@@ -16,6 +16,7 @@ services:
       - ILLUMIO_ORG_ID=
       - ILLUMIO_API_KEY=
       - ILLUMIO_API_SECRET=
+      - CACHE_REFRESH_INTERVAL_SECONDS=3600
 
   frontend:
     build:

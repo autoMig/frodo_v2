@@ -8,6 +8,9 @@ from frodo.models import FirewallPlatform
 
 logger = logging.getLogger("frodo.unicorn")
 
+# Module-level cache: populated by background refresh only. Never fetch on read.
+_servers_cache: list[dict[str, Any]] | None = None
+
 # Suffixes to strip from business application names
 APP_NAME_SUFFIXES = ("-DEV", "-UAT", "-CONT", "-OAT")
 
@@ -84,44 +87,62 @@ class UnicornClient:
 
     async def get_servers(self) -> list[dict[str, Any]]:
         """
-        Fetch all servers from Unicorn API.
-        Uses pagination: pageIndex and pageSize=10000 query params.
-        Fetches pages until results count < pageSize (not a full page).
-        Returns list of server objects with hostname, environment, services, etc.
+        Return servers from cache. Never fetches from API.
         Uses mock data when api_user is empty (development mode).
+        Cache miss returns empty list; data is populated by background refresh only.
         """
         if not self.api_user or not self.api_key:
             logger.info("Unicorn credentials not configured, using mock data")
             return self._get_mock_servers()
 
+        global _servers_cache
+        if _servers_cache is not None:
+            return _servers_cache
+        return []
+
+    async def refresh_servers_cache(self) -> None:
+        """
+        Fetch servers from Unicorn API and update cache.
+        Called by background scheduler only. Skips when credentials not configured.
+        On success, updates cache. On failure, keeps previous cache (or leaves empty).
+        """
+        if not self.api_user or not self.api_key:
+            return
+
+        global _servers_cache
+        try:
+            servers = await self._fetch_servers_from_api()
+            _servers_cache = servers
+            logger.info("Unicorn cache refreshed: %d servers", len(servers))
+        except Exception as e:
+            logger.warning("Unicorn cache refresh failed, keeping previous: %s", e)
+
+    async def _fetch_servers_from_api(self) -> list[dict[str, Any]]:
+        """Fetch all servers from Unicorn API (used by refresh only)."""
         all_servers: list[dict[str, Any]] = []
         page_index = 0
 
         async with httpx.AsyncClient(timeout=30.0) as client:
-            try:
-                while True:
-                    params: list[tuple[str, str | int]] = [
-                        ("pageIndex", page_index),
-                        ("pageSize", self.PAGE_SIZE),
-                    ]
-                    for state in self.lifecycle_states:
-                        params.append(("LifecycleState", state.strip()))
-                    url = f"{self.base_url}/servers"
-                    resp = await client.get(url, headers=self._headers(), params=params)
-                    resp.raise_for_status()
-                    data = resp.json()
+            while True:
+                params: list[tuple[str, str | int]] = [
+                    ("pageIndex", page_index),
+                    ("pageSize", self.PAGE_SIZE),
+                ]
+                for state in self.lifecycle_states:
+                    params.append(("LifecycleState", state.strip()))
+                url = f"{self.base_url}/servers"
+                resp = await client.get(url, headers=self._headers(), params=params)
+                resp.raise_for_status()
+                data = resp.json()
 
-                    results = self._extract_results(data)
-                    all_servers.extend(results)
+                results = self._extract_results(data)
+                all_servers.extend(results)
 
-                    if len(results) < self.PAGE_SIZE:
-                        break
-                    page_index += 1
+                if len(results) < self.PAGE_SIZE:
+                    break
+                page_index += 1
 
-                return all_servers
-            except httpx.HTTPError as e:
-                logger.error("Unicorn API error: %s", e)
-                raise
+        return all_servers
 
     def _extract_results(self, data: dict[str, Any]) -> list[dict[str, Any]]:
         """Extract server list from API response."""

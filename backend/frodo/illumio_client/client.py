@@ -6,6 +6,9 @@ from frodo.models import IllumioEnforcementStatus
 
 logger = logging.getLogger("frodo.illumio")
 
+# Module-level cache: populated by background refresh only. Never fetch on read.
+_workloads_cache: dict[str, dict[str, Any]] | None = None
+
 # Illumio label keys for app and env (configurable via config in future)
 ILLUMIO_APP_LABEL_KEY = "app"
 ILLUMIO_ENV_LABEL_KEY = "env"
@@ -74,20 +77,39 @@ class IllumioClient:
 
     def get_workloads_by_hostname(self) -> dict[str, dict[str, Any]]:
         """
-        Fetch workloads from Illumio and index by hostname.
-        Returns dict mapping hostname (lowercase) -> workload data including
-        enforcement_mode and labels for app/env.
+        Return workloads from cache. Never fetches from API.
+        Cache miss returns empty dict; data is populated by background refresh only.
         """
         if not self.pce_host or not self.api_key:
             logger.debug("Illumio not configured, skipping workloads fetch")
             return {}
 
+        global _workloads_cache
+        if _workloads_cache is not None:
+            return _workloads_cache
+        return {}
+
+    def refresh_workloads_cache(self) -> None:
+        """
+        Fetch workloads from Illumio PCE and update cache.
+        Called by background scheduler only. Skips when not configured.
+        On success, updates cache. On failure, keeps previous cache (or leaves empty).
+        """
+        if not self.pce_host or not self.api_key:
+            return
+
+        global _workloads_cache
         try:
-            pce = self._get_pce()
-            workloads = pce.workloads.get(params={"managed": True})
+            workloads = self._fetch_workloads_from_api()
+            _workloads_cache = workloads
+            logger.info("Illumio cache refreshed: %d workloads", len(workloads))
         except Exception as e:
-            logger.warning("Illumio workloads fetch failed: %s", e)
-            return {}
+            logger.warning("Illumio cache refresh failed, keeping previous: %s", e)
+
+    def _fetch_workloads_from_api(self) -> dict[str, dict[str, Any]]:
+        """Fetch workloads from Illumio PCE (used by refresh only)."""
+        pce = self._get_pce()
+        workloads = pce.workloads.get(params={"managed": True})
 
         result: dict[str, dict[str, Any]] = {}
         for w in workloads or []:
@@ -96,12 +118,10 @@ class IllumioClient:
                 continue
             key = hostname.lower()
 
-            # Extract enforcement_mode from workload
             enforcement = getattr(w, "enforcement_mode", None) or ""
             if hasattr(enforcement, "value"):
                 enforcement = enforcement.value
 
-            # Extract app and env from labels
             labels = getattr(w, "labels", []) or []
             app_val = ""
             env_val = ""

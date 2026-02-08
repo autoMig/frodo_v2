@@ -1,4 +1,5 @@
 """Frodo FastAPI application."""
+import asyncio
 import logging
 import os
 
@@ -27,33 +28,43 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Singleton clients shared by endpoints and background refresh
+_unicorn_client: UnicornClient | None = None
+_illumio_client: IllumioClient | None = None
+
 
 def _get_unicorn_client() -> UnicornClient:
-    base_url = os.environ.get("UNICORN_BASE_URL", "http://localhost:8001")
-    api_user = os.environ.get("UNICORN_API_USER", "")
-    api_key = os.environ.get("UNICORN_API_KEY", "")
-    lifecycle_states_str = os.environ.get("UNICORN_LIFECYCLE_STATES", "Registered,Live,Configure")
-    lifecycle_states = [s.strip() for s in lifecycle_states_str.split(",") if s.strip()]
-    return UnicornClient(
-        base_url=base_url,
-        api_user=api_user,
-        api_key=api_key,
-        lifecycle_states=lifecycle_states,
-    )
+    global _unicorn_client
+    if _unicorn_client is None:
+        base_url = os.environ.get("UNICORN_BASE_URL", "http://localhost:8001")
+        api_user = os.environ.get("UNICORN_API_USER", "")
+        api_key = os.environ.get("UNICORN_API_KEY", "")
+        lifecycle_states_str = os.environ.get("UNICORN_LIFECYCLE_STATES", "Registered,Live,Configure")
+        lifecycle_states = [s.strip() for s in lifecycle_states_str.split(",") if s.strip()]
+        _unicorn_client = UnicornClient(
+            base_url=base_url,
+            api_user=api_user,
+            api_key=api_key,
+            lifecycle_states=lifecycle_states,
+        )
+    return _unicorn_client
 
 
 def _get_illumio_client() -> IllumioClient | None:
-    host = os.environ.get("ILLUMIO_PCE_HOST", "")
-    api_key = os.environ.get("ILLUMIO_API_KEY", "")
-    if not host or not api_key:
-        return None
-    return IllumioClient(
-        pce_host=host,
-        org_id=os.environ.get("ILLUMIO_ORG_ID", "1"),
-        api_key=api_key,
-        api_secret=os.environ.get("ILLUMIO_API_SECRET", ""),
-        port=int(os.environ.get("ILLUMIO_PCE_PORT", "443")),
-    )
+    global _illumio_client
+    if _illumio_client is None:
+        host = os.environ.get("ILLUMIO_PCE_HOST", "")
+        api_key = os.environ.get("ILLUMIO_API_KEY", "")
+        if not host or not api_key:
+            return None
+        _illumio_client = IllumioClient(
+            pce_host=host,
+            org_id=os.environ.get("ILLUMIO_ORG_ID", "1"),
+            api_key=api_key,
+            api_secret=os.environ.get("ILLUMIO_API_SECRET", ""),
+            port=int(os.environ.get("ILLUMIO_PCE_PORT", "443")),
+        )
+    return _illumio_client
 
 
 def _get_application_service() -> ApplicationService:
@@ -61,6 +72,38 @@ def _get_application_service() -> ApplicationService:
         unicorn_client=_get_unicorn_client(),
         illumio_client=_get_illumio_client(),
     )
+
+
+async def _run_cache_refresh() -> None:
+    """Refresh Unicorn and Illumio caches. Called by background scheduler."""
+    unicorn = _get_unicorn_client()
+    illumio = _get_illumio_client()
+
+    await unicorn.refresh_servers_cache()
+    if illumio:
+        await asyncio.to_thread(illumio.refresh_workloads_cache)
+
+
+async def _cache_refresh_loop() -> None:
+    """Background task: refresh caches on startup (after delay) and every hour."""
+    interval = int(os.environ.get("CACHE_REFRESH_INTERVAL_SECONDS", "3600"))
+    startup_delay = int(os.environ.get("CACHE_REFRESH_STARTUP_DELAY_SECONDS", "5"))
+
+    await asyncio.sleep(startup_delay)
+    logger.info("Starting cache refresh background task (interval=%ds)", interval)
+
+    while True:
+        try:
+            await _run_cache_refresh()
+        except Exception as e:
+            logger.exception("Cache refresh failed: %s", e)
+        await asyncio.sleep(interval)
+
+
+@app.on_event("startup")
+async def startup_cache_refresh():
+    """Start background cache refresh task."""
+    asyncio.create_task(_cache_refresh_loop())
 
 
 @app.get("/health")
