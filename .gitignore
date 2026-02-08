@@ -1,3 +1,7 @@
+# Pip/npm config (user copies from .example, contains env-specific URLs)
+pip.conf
+.npmrc
+
 # Python
 __pycache__/
 *.py[cod]

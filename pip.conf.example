@@ -1,0 +1,12 @@
+# Pip configuration for internal PyPI mirror.
+# Copy to pip.conf (project root) or ~/.config/pip/pip.conf (Linux/macOS)
+# or %APPDATA%\pip\pip.ini (Windows).
+#
+# Alternatively, set PIP_INDEX_URL and PIP_TRUSTED_HOST in your environment.
+
+[global]
+index-url = https://your-internal-pypi-mirror.example.com/simple/
+trusted-host = your-internal-pypi-mirror.example.com
+
+# If your mirror requires authentication:
+# extra-index-url = https://user:token@your-internal-pypi-mirror.example.com/simple/

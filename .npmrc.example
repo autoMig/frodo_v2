@@ -1,0 +1,13 @@
+# NPM configuration for internal registry mirror.
+# Copy to .npmrc in project root (or frontend/ for frontend-only).
+#
+# Alternatively, set npm_config_registry in your environment.
+
+# Primary registry for all packages
+registry=https://your-internal-npm-mirror.example.com/
+
+# If your registry uses self-signed or internal CA certificates:
+# strict-ssl=false
+
+# If your registry requires authentication (token from npm login):
+# //your-internal-npm-mirror.example.com/:_authToken=${NPM_TOKEN}
