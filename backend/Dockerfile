@@ -2,6 +2,10 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# Copy pip config if present (pip.conf or pip.conf.example for default PyPI)
+COPY pip.conf* /tmp/
+RUN if [ -f /tmp/pip.conf ]; then cp /tmp/pip.conf /etc/pip.conf; elif [ -f /tmp/pip.conf.example ]; then cp /tmp/pip.conf.example /etc/pip.conf; fi
+
 COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

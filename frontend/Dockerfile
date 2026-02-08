@@ -2,6 +2,10 @@ FROM node:20-alpine AS build
 
 WORKDIR /app
 
+# Copy npm config if present (.npmrc or .npmrc.example for default registry)
+COPY .npmrc* ./
+RUN if [ ! -f .npmrc ] && [ -f .npmrc.example ]; then cp .npmrc.example .npmrc; fi
+
 COPY package*.json ./
 RUN npm ci
 

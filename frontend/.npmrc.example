@@ -1,7 +1,7 @@
 # NPM configuration for internal registry mirror.
-# Copy to .npmrc in project root or frontend/ (for frontend Docker build).
+# Copy to .npmrc in this directory (frontend/).
 #
-# For Docker builds: copy to frontend/.npmrc - it is copied during frontend build.
+# For Docker builds: .npmrc is copied from frontend/ before npm ci.
 # When only this example exists, npm uses default registry (registry commented out).
 
 # Uncomment and set for internal npm registry:
