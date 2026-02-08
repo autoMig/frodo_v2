@@ -1,5 +1,7 @@
 """Unicorn API client for server inventory."""
 import logging
+import os
+import time
 from typing import Any
 
 import httpx
@@ -7,6 +9,12 @@ import httpx
 from frodo.models import FirewallPlatform
 
 logger = logging.getLogger("frodo.unicorn")
+
+
+def _verify_ssl_default() -> bool:
+    """Default True unless VERIFY_SSL is false/0/no (for testing with self-signed certs)."""
+    v = os.environ.get("VERIFY_SSL", "true").strip().lower()
+    return v not in ("false", "0", "no")
 
 # Module-level cache: populated by background refresh only. Never fetch on read.
 _servers_cache: list[dict[str, Any]] | None = None
@@ -69,11 +77,15 @@ class UnicornClient:
         api_user: str,
         api_key: str,
         lifecycle_states: list[str] | None = None,
+        verify_ssl: bool | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.api_user = api_user
         self.api_key = api_key
         self.lifecycle_states = lifecycle_states or []
+        self.verify_ssl = verify_ssl if verify_ssl is not None else _verify_ssl_default()
+        if not self.verify_ssl:
+            logger.warning("Unicorn: SSL verification disabled (VERIFY_SSL=false) - for testing only")
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -111,9 +123,12 @@ class UnicornClient:
 
         global _servers_cache
         try:
+            logger.info("Unicorn cache refresh: fetching servers from %s/servers", self.base_url)
+            start = time.perf_counter()
             servers = await self._fetch_servers_from_api()
             _servers_cache = servers
-            logger.info("Unicorn cache refreshed: %d servers", len(servers))
+            elapsed = time.perf_counter() - start
+            logger.info("Unicorn cache refreshed: %d servers in %.1fs", len(servers), elapsed)
         except Exception as e:
             logger.warning("Unicorn cache refresh failed, keeping previous: %s", e)
 
@@ -122,7 +137,7 @@ class UnicornClient:
         all_servers: list[dict[str, Any]] = []
         page_index = 0
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=30.0, verify=self.verify_ssl) as client:
             while True:
                 params: list[tuple[str, str | int]] = [
                     ("pageIndex", page_index),
@@ -137,6 +152,13 @@ class UnicornClient:
 
                 results = self._extract_results(data)
                 all_servers.extend(results)
+
+                logger.info(
+                    "Unicorn: page %d fetched %d servers (total: %d)",
+                    page_index + 1,
+                    len(results),
+                    len(all_servers),
+                )
 
                 if len(results) < self.PAGE_SIZE:
                     break

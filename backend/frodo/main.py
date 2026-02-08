@@ -41,11 +41,13 @@ def _get_unicorn_client() -> UnicornClient:
         api_key = os.environ.get("UNICORN_API_KEY", "")
         lifecycle_states_str = os.environ.get("UNICORN_LIFECYCLE_STATES", "Registered,Live,Configure")
         lifecycle_states = [s.strip() for s in lifecycle_states_str.split(",") if s.strip()]
+        verify_ssl = os.environ.get("VERIFY_SSL", "true").strip().lower() not in ("false", "0", "no")
         _unicorn_client = UnicornClient(
             base_url=base_url,
             api_user=api_user,
             api_key=api_key,
             lifecycle_states=lifecycle_states,
+            verify_ssl=verify_ssl,
         )
     return _unicorn_client
 
@@ -57,12 +59,14 @@ def _get_illumio_client() -> IllumioClient | None:
         api_key = os.environ.get("ILLUMIO_API_KEY", "")
         if not host or not api_key:
             return None
+        verify_ssl = os.environ.get("VERIFY_SSL", "true").strip().lower() not in ("false", "0", "no")
         _illumio_client = IllumioClient(
             pce_host=host,
             org_id=os.environ.get("ILLUMIO_ORG_ID", "1"),
             api_key=api_key,
             api_secret=os.environ.get("ILLUMIO_API_SECRET", ""),
             port=int(os.environ.get("ILLUMIO_PCE_PORT", "443")),
+            verify_ssl=verify_ssl,
         )
     return _illumio_client
 
@@ -79,9 +83,12 @@ async def _run_cache_refresh() -> None:
     unicorn = _get_unicorn_client()
     illumio = _get_illumio_client()
 
+    logger.info("Cache refresh: starting Unicorn fetch")
     await unicorn.refresh_servers_cache()
     if illumio:
+        logger.info("Cache refresh: starting Illumio fetch")
         await asyncio.to_thread(illumio.refresh_workloads_cache)
+    logger.info("Cache refresh: complete")
 
 
 async def _cache_refresh_loop() -> None:

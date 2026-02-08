@@ -1,10 +1,18 @@
 """Illumio API client for workload and enforcement status."""
 import logging
+import os
+import time
 from typing import Any
 
 from frodo.models import IllumioEnforcementStatus
 
 logger = logging.getLogger("frodo.illumio")
+
+
+def _verify_ssl_default() -> bool:
+    """Default True unless VERIFY_SSL is false/0/no (for testing with self-signed certs)."""
+    v = os.environ.get("VERIFY_SSL", "true").strip().lower()
+    return v not in ("false", "0", "no")
 
 # Module-level cache: populated by background refresh only. Never fetch on read.
 _workloads_cache: dict[str, dict[str, Any]] | None = None
@@ -61,18 +69,23 @@ class IllumioClient:
         api_key: str,
         api_secret: str,
         port: int | str = 443,
+        verify_ssl: bool | None = None,
     ):
         self.pce_host = pce_host
         self.org_id = str(org_id)
         self.api_key = api_key
         self.api_secret = api_secret
         self.port = str(port)
+        self.verify_ssl = verify_ssl if verify_ssl is not None else _verify_ssl_default()
+        if not self.verify_ssl:
+            logger.warning("Illumio: SSL verification disabled (VERIFY_SSL=false) - for testing only")
 
     def _get_pce(self):
         """Lazy import to avoid failure when illumio not configured."""
         from illumio import PolicyComputeEngine
         pce = PolicyComputeEngine(self.pce_host, port=self.port, org_id=self.org_id)
         pce.set_credentials(self.api_key, self.api_secret)
+        pce.set_tls_settings(verify=self.verify_ssl)
         return pce
 
     def get_workloads_by_hostname(self) -> dict[str, dict[str, Any]]:
@@ -100,42 +113,94 @@ class IllumioClient:
 
         global _workloads_cache
         try:
+            logger.info(
+                "Illumio cache refresh: fetching workloads from PCE %s (may take several minutes for large environments)",
+                self.pce_host,
+            )
+            start = time.perf_counter()
             workloads = self._fetch_workloads_from_api()
             _workloads_cache = workloads
-            logger.info("Illumio cache refreshed: %d workloads", len(workloads))
+            elapsed = time.perf_counter() - start
+            logger.info("Illumio cache refreshed: %d workloads in %.1fs", len(workloads), elapsed)
         except Exception as e:
             logger.warning("Illumio cache refresh failed, keeping previous: %s", e)
 
     def _fetch_workloads_from_api(self) -> dict[str, dict[str, Any]]:
-        """Fetch workloads from Illumio PCE (used by refresh only)."""
+        """Fetch workloads from Illumio PCE (used by refresh only). Uses async API with job status logging."""
         pce = self._get_pce()
-        workloads = pce.workloads.get(params={"managed": True})
+        endpoint = f"/orgs/{self.org_id}/workloads"
+        params = {"managed": True}
+
+        # Use async API to support large collections; log job progress
+        headers = {"Prefer": "respond-async"}
+        response = pce.get(endpoint, params=params, headers=headers, include_org=False)
+        response.raise_for_status()
+
+        if response.status_code == 202:
+            # Async job - poll and log status
+            location = response.headers.get("Location", "")
+            retry_after = int(response.headers.get("Retry-After", "2"))
+            logger.info("Illumio: async export job started, polling for completion (retry_after=%ds)", retry_after)
+
+            poll_interval = float(retry_after)
+            poll_count = 0
+            while True:
+                time.sleep(poll_interval)
+                poll_interval = min(poll_interval * 1.5, 30)
+                poll_count += 1
+
+                poll_resp = pce.get(location)
+                poll_resp.raise_for_status()
+                poll_result = poll_resp.json()
+                poll_status = poll_result.get("status", "unknown")
+
+                logger.info("Illumio: job poll #%d, status=%s", poll_count, poll_status)
+
+                if poll_status == "failed":
+                    msg = poll_result.get("result", {}).get("message", str(poll_result))
+                    raise RuntimeError(f"Illumio async job failed: {msg}")
+                if poll_status == "done":
+                    collection_href = poll_result.get("result", {}).get("href", "")
+                    break
+                if poll_status == "completed":
+                    # Traffic flow jobs use 'completed' and result is the href directly
+                    collection_href = poll_result.get("result", "")
+                    break
+
+            response = pce.get(collection_href)
+            response.raise_for_status()
+            raw_workloads = response.json()
+        else:
+            raw_workloads = response.json()
+
+        def _get(obj: Any, key: str, default: Any = None) -> Any:
+            return obj.get(key, default) if isinstance(obj, dict) else getattr(obj, key, default)
 
         result: dict[str, dict[str, Any]] = {}
-        for w in workloads or []:
-            hostname = getattr(w, "hostname", None) or ""
+        for w in raw_workloads or []:
+            hostname = (_get(w, "hostname") or "").strip()
             if not hostname:
                 continue
             key = hostname.lower()
 
-            enforcement = getattr(w, "enforcement_mode", None) or ""
+            enforcement = _get(w, "enforcement_mode") or ""
             if hasattr(enforcement, "value"):
                 enforcement = enforcement.value
 
-            labels = getattr(w, "labels", []) or []
+            labels = _get(w, "labels") or []
             app_val = ""
             env_val = ""
             for lbl in labels:
-                lb_key = getattr(lbl, "key", "") or ""
-                lb_val = getattr(lbl, "value", "") or ""
-                if lb_key.lower() == ILLUMIO_APP_LABEL_KEY:
-                    app_val = lb_val
-                elif lb_key.lower() == ILLUMIO_ENV_LABEL_KEY:
-                    env_val = lb_val
+                lb_key = lbl.get("key", "") if isinstance(lbl, dict) else getattr(lbl, "key", "") or ""
+                lb_val = lbl.get("value", "") if isinstance(lbl, dict) else getattr(lbl, "value", "") or ""
+                if (lb_key or "").lower() == ILLUMIO_APP_LABEL_KEY:
+                    app_val = lb_val or ""
+                elif (lb_key or "").lower() == ILLUMIO_ENV_LABEL_KEY:
+                    env_val = lb_val or ""
 
             result[key] = {
                 "hostname": hostname,
-                "enforcement_mode": enforcement,
+                "enforcement_mode": str(enforcement) if enforcement else "",
                 "app_label": app_val,
                 "env_label": env_val,
             }
