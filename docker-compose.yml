@@ -1,0 +1,27 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - UNICORN_BASE_URL=
+      - UNICORN_API_USER=
+      - UNICORN_API_KEY=
+      - UNICORN_LIFECYCLE_STATES=Registered,Live,Configure
+      - ILLUMIO_PCE_HOST=
+      - ILLUMIO_ORG_ID=
+      - ILLUMIO_API_KEY=
+      - ILLUMIO_API_SECRET=
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend

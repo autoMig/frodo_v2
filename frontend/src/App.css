@@ -1,0 +1,48 @@
+.app {
+  min-height: 100vh;
+  background: var(--bg, #0f172a);
+}
+
+.app-header {
+  padding: 2rem 1.5rem;
+  border-bottom: 1px solid var(--border, #1e293b);
+  background: var(--header-bg, #0f172a);
+}
+
+.app-header h1 {
+  margin: 0;
+  font-size: 1.75rem;
+  font-weight: 700;
+  color: var(--text-primary, #f8fafc);
+  letter-spacing: -0.02em;
+}
+
+.app-subtitle {
+  margin: 0.35rem 0 0;
+  font-size: 0.95rem;
+  color: var(--text-muted, #94a3b8);
+}
+
+.app-main {
+  padding: 1.5rem;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.app-loading,
+.app-empty,
+.app-error {
+  text-align: center;
+  padding: 3rem 1rem;
+  color: var(--text-muted, #94a3b8);
+}
+
+.app-error {
+  color: #f87171;
+}
+
+.application-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 1rem;
+}
