@@ -540,8 +540,8 @@ class IllumioClient:
 
         include_services = []
         ports_to_exclude = exclude_ports - {query.port} if query.port is not None else exclude_ports
-        exclude_services = [{"port": p, "proto": "tcp"} for p in ports_to_exclude]
-        exclude_services += [{"port": p, "proto": "udp"} for p in ports_to_exclude]
+        exclude_services = [{"port": p, "proto": 6} for p in ports_to_exclude]
+        exclude_services += [{"port": p, "proto": 17} for p in ports_to_exclude]
         if query.port is not None:
             proto = 6 if (query.protocol or "").lower() == "tcp" else 17
             include_services.append({"port": query.port, "proto": proto})
