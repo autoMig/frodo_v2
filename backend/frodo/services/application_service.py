@@ -17,8 +17,32 @@ logger = logging.getLogger("frodo.services")
 
 
 def _normalize_env(code: str) -> str:
-    """Normalize environment code for grouping."""
-    return (code or "").strip().lower() or "unknown"
+    """Normalize environment code for grouping. Maps Contingency -> production."""
+    raw = (code or "").strip().lower() or "unknown"
+    if raw == "contingency":
+        return "production"
+    return raw
+
+
+def _get_env_name(server: dict) -> str:
+    """Extract environment from server.environment.name."""
+    env = server.get("environment") or {}
+    return _normalize_env((env.get("name") or "").strip())
+
+
+def _get_app_names_from_services(server: dict) -> list[str]:
+    """Extract business application names from server.services[].service.name."""
+    services = server.get("services") or []
+    names = []
+    for svc in services:
+        if not isinstance(svc, dict):
+            continue
+        service_obj = svc.get("service")
+        if isinstance(service_obj, dict):
+            name = (service_obj.get("name") or "").strip()
+            if name:
+                names.append(name)
+    return names
 
 
 def _illumio_app_env_normalizer(app: str, env: str) -> tuple[str, str]:
@@ -43,22 +67,31 @@ class ApplicationService:
         Uses naming convention to map groups to (app, env).
         """
         servers = await self.unicorn.get_servers()
+
+        if not servers:
+            logger.warning(
+                "No servers in cache - ensure cache refresh has completed (runs ~5s after startup)"
+            )
+            return []
+
         app_env_to_servers: dict[tuple[str, str], list[dict]] = defaultdict(list)
 
         for server in servers:
-            env_obj = server.get("environment") or {}
-            env_code = _normalize_env(env_obj.get("code") or "")
-            services = server.get("services") or []
-
-            for svc in services:
-                if not isinstance(svc, dict):
-                    continue
-                app_name_raw = (svc.get("businessApplicationName") or "").strip()
-                if not app_name_raw:
-                    continue
+            env_code = _get_env_name(server)
+            for app_name_raw in set(_get_app_names_from_services(server)):
                 app_name = strip_app_name_suffix(app_name_raw)
                 key = (app_name, env_code)
                 app_env_to_servers[key].append(server)
+
+        if not app_env_to_servers:
+            logger.warning(
+                "Servers received but no app+env extracted - Unicorn data structure may differ. "
+                "Expected: server.environment.name, server.services[].service.name. "
+                "Sample server keys: %s. First service: %s",
+                list(servers[0].keys()) if servers else [],
+                servers[0].get("services", [])[:1] if servers else [],
+            )
+            return []
 
         # Filter by AD group membership
         allowed_app_envs = _expand_allowed_app_envs(ad_groups)
@@ -67,6 +100,12 @@ class ApplicationService:
                 k: v for k, v in app_env_to_servers.items()
                 if k in allowed_app_envs
             }
+            if not app_env_to_servers:
+                logger.info(
+                    "AD group filter excluded all apps (groups=%s, allowed=%s)",
+                    ad_groups,
+                    allowed_app_envs,
+                )
 
         # Get Illumio enforcement status for apps that have Illumio
         illumio_status: dict[tuple[str, str], IllumioEnforcementStatus] = {}

@@ -144,7 +144,7 @@ class UnicornClient:
                     ("pageSize", self.PAGE_SIZE),
                 ]
                 for state in self.lifecycle_states:
-                    params.append(("LifecycleState", state.strip()))
+                    params.append(("LifecycleStateNames", state.strip()))
                 url = f"{self.base_url}/servers"
                 resp = await client.get(url, headers=self._headers(), params=params)
                 resp.raise_for_status()
@@ -181,47 +181,47 @@ class UnicornClient:
         return [
             {
                 "hostname": "appx-web-01",
-                "environment": {"code": "production", "id": "1"},
+                "environment": {"name": "production", "code": "production", "id": "1"},
                 "osVersion": {"operatingSystem": {"name": "Windows"}},
                 "networkIdentifier": {"code": "internal"},
                 "networkSubzone": "HIGH-RISK",
                 "hostingPlatform": {"name": "ICP-2-Prod"},
-                "services": [{"businessApplicationName": "APP-X", "businessApplicationNumber": "BA1234"}],
+                "services": [{"service": {"name": "APP-X"}}],
             },
             {
                 "hostname": "appx-web-02",
-                "environment": {"code": "production", "id": "1"},
+                "environment": {"name": "production", "code": "production", "id": "1"},
                 "osVersion": {"operatingSystem": {"name": "Windows"}},
                 "networkIdentifier": {"code": "internal"},
                 "networkSubzone": "HIGH-RISK",
                 "hostingPlatform": {"name": "ICP-2-Prod"},
-                "services": [{"businessApplicationName": "APP-X", "businessApplicationNumber": "BA1234"}],
+                "services": [{"service": {"name": "APP-X"}}],
             },
             {
                 "hostname": "appx-db-01",
-                "environment": {"code": "production", "id": "1"},
+                "environment": {"name": "production", "code": "production", "id": "1"},
                 "osVersion": {"operatingSystem": {"name": "Linux"}},
                 "networkIdentifier": {"code": "internal"},
                 "networkSubzone": "",
                 "hostingPlatform": {"name": "ICP-2-Prod"},
-                "services": [{"businessApplicationName": "APP-X", "businessApplicationNumber": "BA1234"}],
+                "services": [{"service": {"name": "APP-X"}}],
             },
             {
                 "hostname": "appy-web-01",
-                "environment": {"code": "uat", "id": "2"},
+                "environment": {"name": "uat", "code": "uat", "id": "2"},
                 "osVersion": {"operatingSystem": {"name": "Windows"}},
                 "networkIdentifier": {"code": "IDMZ"},
                 "networkSubzone": "",
                 "hostingPlatform": {"name": "Legacy-VM"},
-                "services": [{"businessApplicationName": "APP-Y-UAT", "businessApplicationNumber": "BA5678"}],
+                "services": [{"service": {"name": "APP-Y-UAT"}}],
             },
             {
                 "hostname": "appz-api-01",
-                "environment": {"code": "production", "id": "1"},
+                "environment": {"name": "production", "code": "production", "id": "1"},
                 "osVersion": {"operatingSystem": {"name": "Linux"}},
                 "networkIdentifier": {"code": "internal"},
                 "networkSubzone": "LOW-RISK",
                 "hostingPlatform": {"name": "AWS-Prod"},
-                "services": [{"businessApplicationName": "APP-Z", "businessApplicationNumber": "BA9999"}],
+                "services": [{"service": {"name": "APP-Z"}}],
             },
         ]
