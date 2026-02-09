@@ -228,6 +228,7 @@ class ApplicationService:
                 matching_key = (a, e)
                 break
         if not matching_key:
+            logger.debug("Application not found: app=%s env=%s", app_name, env)
             return None
 
         # AD group filter (case-insensitive app match)
@@ -235,6 +236,11 @@ class ApplicationService:
         if allowed_app_envs:
             key_for_auth = (matching_key[0].upper(), matching_key[1])
             if key_for_auth not in allowed_app_envs:
+                logger.debug(
+                    "Application excluded by AD group filter: app=%s env=%s",
+                    matching_key[0],
+                    matching_key[1],
+                )
                 return None
 
         server_list = app_env_to_servers[matching_key]

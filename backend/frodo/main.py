@@ -215,8 +215,10 @@ async def get_illumio_workloads(
 
     illumio = _get_illumio_client()
     if not illumio:
+        logger.debug("Illumio workloads: client not configured")
         return {"workloads": []}
 
+    logger.info("Illumio workloads: fetching app=%s env=%s", app, env)
     timeout_sec = int(os.environ.get("ILLUMIO_WORKLOADS_FETCH_TIMEOUT_SECONDS", "60"))
     try:
         raw = await asyncio.wait_for(
@@ -229,6 +231,7 @@ async def get_illumio_workloads(
             timeout=timeout_sec,
         )
     except asyncio.TimeoutError:
+        logger.warning("Illumio workloads: timeout after %ds for app=%s env=%s", timeout_sec, app, env)
         raise HTTPException(status_code=504, detail="Illumio workloads request timed out")
 
     workloads = [
@@ -241,6 +244,7 @@ async def get_illumio_workloads(
         }
         for w in raw
     ]
+    logger.debug("Illumio workloads: returning %d workloads for app=%s env=%s", len(workloads), app, env)
     return {"workloads": workloads}
 
 
@@ -261,14 +265,21 @@ async def get_illumio_rulesets(
 
     illumio = _get_illumio_client()
     if not illumio:
-        return {"rulesets": []}
+        logger.debug("Illumio rulesets: client not configured")
+        return {"application_rules": [], "external_rules": []}
 
-    rulesets = illumio.get_rulesets_for_app_env(
+    logger.info("Illumio rulesets: fetching app=%s env=%s", app, env)
+    result = illumio.get_rules_for_app_env_via_rule_search(
         app=details.business_application_name,
         env=details.environment,
         app_env_normalizer=_illumio_app_env_normalizer,
     )
-    return {"rulesets": [r.model_dump() for r in rulesets]}
+    logger.debug(
+        "Illumio rulesets: returning %d application + %d external rules",
+        len(result.application_rules),
+        len(result.external_rules),
+    )
+    return result.model_dump()
 
 
 @app.post("/api/applications/{app}/{env}/illumio/traffic")
@@ -289,8 +300,10 @@ async def post_illumio_traffic(
 
     illumio = _get_illumio_client()
     if not illumio:
+        logger.debug("Illumio traffic: client not configured")
         return {"flows": []}
 
+    logger.info("Illumio traffic: query for app=%s env=%s", app, env)
     flows = await asyncio.to_thread(
         illumio.get_traffic_flows,
         details.business_application_name,
@@ -298,4 +311,5 @@ async def post_illumio_traffic(
         query,
         _illumio_app_env_normalizer,
     )
+    logger.debug("Illumio traffic: returning %d flows for app=%s env=%s", len(flows), app, env)
     return {"flows": [f.model_dump() for f in flows]}

@@ -7,7 +7,9 @@ from typing import Any
 
 from frodo.models import (
     IllumioEnforcementStatus,
+    IllumioRuleSearchResult,
     IllumioRuleSummary,
+    IllumioRulesetSearchResponse,
     IllumioRulesetSummary,
     IllumioTrafficFlow,
     TrafficQueryRequest,
@@ -335,6 +337,7 @@ class IllumioClient:
         Returns empty list if labels not found in cache.
         """
         if not self.pce_host or not self.api_key:
+            logger.debug("Workload fetch skipped: Illumio not configured")
             return []
 
         app_norm = (app or "").strip()
@@ -348,9 +351,15 @@ class IllumioClient:
         app_label = get_label_entry(ILLUMIO_APP_LABEL_KEY, app_norm)
         env_label = get_label_entry(ILLUMIO_ENV_LABEL_KEY, env_norm)
         if not app_label or not env_label:
+            logger.debug(
+                "Workload fetch: labels not found for app=%s env=%s",
+                app_norm,
+                env_norm,
+            )
             return []
 
-        labels_param = json.dumps([[app_label, env_label]])
+        logger.info("Workload fetch: fetching for app=%s env=%s", app_norm, env_norm)
+        labels_param = json.dumps([[app_label["href"], env_label["href"]]])
         pce = self._get_pce()
         try:
             workloads = pce.workloads.get(params={"labels": labels_param, "max_results": 500})
@@ -363,6 +372,7 @@ class IllumioClient:
             parsed = _parse_workload_to_dict(w)
             if parsed:
                 result.append(parsed)
+        logger.info("Workload fetch: app=%s env=%s => %d workloads", app_norm, env_norm, len(result))
         return result
 
     def get_rulesets_for_app_env(
@@ -371,7 +381,7 @@ class IllumioClient:
         env: str,
         app_env_normalizer: callable = None,
     ) -> list[IllumioRulesetSummary]:
-        """Fetch rulesets that apply to app+env, with their rules."""
+        """Fetch rulesets that apply to app+env, with their rules. DEPRECATED: use get_rules_for_app_env_via_rule_search."""
         if not self.pce_host or not self.api_key:
             return []
 
@@ -410,6 +420,109 @@ class IllumioClient:
                 IllumioRulesetSummary(name=name, href=href, rules=rules)
             )
         return result
+
+    def get_rules_for_app_env_via_rule_search(
+        self,
+        app: str,
+        env: str,
+        app_env_normalizer: callable = None,
+    ) -> IllumioRulesetSearchResponse:
+        """
+        Fetch rules for app+env via rule_search API (Advanced search).
+        Two calls: consumer=our app+env, provider=our app+env. Merge and categorize.
+        Sync only; max 500 rules per call.
+        """
+        if not self.pce_host or not self.api_key:
+            logger.debug("Rule search skipped: Illumio not configured")
+            return IllumioRulesetSearchResponse()
+
+        app_norm = (app or "").strip()
+        env_norm = _normalize_env_for_lookup(env)
+        if app_env_normalizer:
+            app_norm, env_norm = app_env_normalizer(app_norm, env_norm)
+        else:
+            app_norm = strip_app_name_suffix(app_norm)
+            env_norm = _normalize_env_for_lookup(env_norm)
+
+        logger.info("Rule search: fetching rules for app=%s env=%s", app_norm, env_norm)
+
+        app_label = get_label_entry(ILLUMIO_APP_LABEL_KEY, app_norm)
+        env_label = get_label_entry(ILLUMIO_ENV_LABEL_KEY, env_norm)
+        if not app_label or not env_label:
+            logger.warning(
+                "Rule search: labels not found in cache for app=%s env=%s (labels cache may be empty)",
+                app_norm,
+                env_norm,
+            )
+            return IllumioRulesetSearchResponse()
+
+        app_href = app_label["href"]
+        env_href = env_label["href"]
+        label_map = get_label_map()
+
+        label_actors = [
+            {"label": {"href": app_href}},
+            {"label": {"href": env_href}},
+        ]
+
+        pce = self._get_pce()
+        all_rules: list[dict[str, Any]] = []
+        seen_hrefs: set[str] = set()
+
+        for body_key, body_value in [
+            ("destinations", label_actors),  # consumer (source)
+            ("providers", label_actors),    # provider (destination)
+        ]:
+            body: dict[str, Any] = {body_key: body_value, "max_results": 500}
+            try:
+                rules_data = _rule_search_via_post(pce, body)
+                count = len(rules_data or [])
+                logger.debug("Rule search (%s): %d rules returned", body_key, count)
+                for r in rules_data or []:
+                    href = _get_attr(r, "href", "")
+                    if href and href not in seen_hrefs:
+                        seen_hrefs.add(href)
+                        all_rules.append(r)
+            except Exception as e:
+                logger.warning("Rule search failed (%s): %s", body_key, e)
+
+        application_rules: list[IllumioRuleSearchResult] = []
+        external_rules: list[IllumioRuleSearchResult] = []
+
+        for r in all_rules:
+            rule_set = _get_attr(r, "rule_set")
+            scope_matches, has_scope_labels = _rule_search_scope_matches(
+                rule_set, app_href, env_href, label_map
+            )
+            if not has_scope_labels:
+                continue
+            if not scope_matches:
+                category = "external"
+            else:
+                unscoped = _get_attr(r, "unscoped_destinations") is True
+                category = "application_inbound" if unscoped else "application_intrascope"
+
+            rule_result = _build_rule_search_result(
+                r, rule_set, category, app_href, env_href, label_map
+            )
+            if category == "external":
+                external_rules.append(rule_result)
+            else:
+                application_rules.append(rule_result)
+
+        logger.info(
+            "Rule search: app=%s env=%s => %d application rules, %d external rules (%d excluded)",
+            app_norm,
+            env_norm,
+            len(application_rules),
+            len(external_rules),
+            len(all_rules) - len(application_rules) - len(external_rules),
+        )
+
+        return IllumioRulesetSearchResponse(
+            application_rules=application_rules,
+            external_rules=external_rules,
+        )
 
     def get_traffic_flows(
         self,
@@ -559,6 +672,136 @@ def _parse_workload_to_dict(w: Any) -> dict[str, Any] | None:
         "env_label": env_val,
         "loc_label": loc_val,
     }
+
+
+def _rule_search_via_post(pce: Any, body: dict[str, Any]) -> list[Any]:
+    """Call POST rule_search sync. Returns sec_rules from response."""
+    endpoint = f"/orgs/{pce.org_id}/sec_policy/active/rule_search"
+    headers = {"Content-Type": "application/json"}
+    logger.debug("Rule search API: POST %s", endpoint)
+    response = pce.post(endpoint, json=body, headers=headers, include_org=False)
+    response.raise_for_status()
+    data = response.json() if hasattr(response, "json") else {}
+    if isinstance(data, dict):
+        return data.get("sec_rules") or data.get("rules") or []
+    if isinstance(data, list):
+        return data
+    return []
+
+
+def _rule_search_scope_matches(
+    rule_set: Any,
+    app_href: str,
+    env_href: str,
+    label_map: dict[str, tuple[str, str]],
+) -> tuple[bool, bool]:
+    """
+    Check if ruleset scope includes app+env. Returns (matches, has_scope_labels).
+    has_scope_labels=False means exclude (core infrastructure, no scopes).
+    """
+    scopes = (_get_attr(rule_set, "scopes") or []) if rule_set else []
+    if not scopes:
+        return False, False
+    has_any_labels = False
+    for scope in scopes:
+        label_refs = _get_attr(scope, "label") or _get_attr(scope, "labels") or []
+        if isinstance(label_refs, dict):
+            label_refs = [label_refs]
+        hrefs: set[str] = set()
+        for lbl in label_refs:
+            href = _get_attr(lbl, "href", "") if isinstance(lbl, dict) else _get_attr(lbl, "href", "")
+            if href:
+                hrefs.add(href)
+                has_any_labels = True
+        if app_href in hrefs and env_href in hrefs:
+            return True, True
+    return False, has_any_labels
+
+
+def _format_rule_labels_for_display(
+    actors: list[Any],
+    our_app_href: str,
+    our_env_href: str,
+    label_map: dict[str, tuple[str, str]],
+) -> list[str]:
+    """Extract our app+env and other label types (e.g. loc) for display. Exclude other apps."""
+    result: list[str] = []
+    seen: set[str] = set()
+    for actor in actors or []:
+        lbl = _get_attr(actor, "label") or actor
+        href = _get_attr(lbl, "href", "") if isinstance(lbl, dict) else _get_attr(lbl, "href", "")
+        key, value = label_map.get(href, ("", ""))
+        if not key and href:
+            key = _get_attr(lbl, "key", "") if isinstance(lbl, dict) else _get_attr(lbl, "key", "")
+            value = _get_attr(lbl, "value", "") if isinstance(lbl, dict) else _get_attr(lbl, "value", "")
+        key_lower = (key or "").lower()
+        display_val = (value or "").strip()
+        if not display_val:
+            continue
+        if key_lower == ILLUMIO_APP_LABEL_KEY:
+            if href == our_app_href and display_val not in seen:
+                result.append(display_val)
+                seen.add(display_val)
+        elif key_lower == ILLUMIO_ENV_LABEL_KEY:
+            if href == our_env_href and display_val not in seen:
+                result.append(display_val)
+                seen.add(display_val)
+        elif key_lower == ILLUMIO_LOC_LABEL_KEY:
+            if display_val not in seen:
+                result.append(display_val)
+                seen.add(display_val)
+    return result
+
+
+def _parse_ingress_services_summary(ingress_services: Any) -> str:
+    """Build human-readable summary of ports/protocols."""
+    items = ingress_services or []
+    if not isinstance(items, list):
+        return ""
+    parts: list[str] = []
+    for svc in items[:5]:
+        port = _get_attr(svc, "port")
+        to_port = _get_attr(svc, "to_port")
+        proto = _get_attr(svc, "proto")
+        if proto == 6:
+            proto_str = "TCP"
+        elif proto == 17:
+            proto_str = "UDP"
+        else:
+            proto_str = str(proto) if proto is not None else ""
+        if port is not None:
+            if to_port is not None and to_port != port:
+                parts.append(f"{proto_str} {port}-{to_port}".strip())
+            else:
+                parts.append(f"{proto_str} {port}".strip())
+    return ", ".join(parts) if parts else ""
+
+
+def _build_rule_search_result(
+    rule: Any,
+    rule_set: Any,
+    category: str,
+    app_href: str,
+    env_href: str,
+    label_map: dict[str, tuple[str, str]],
+) -> IllumioRuleSearchResult:
+    """Build IllumioRuleSearchResult from raw rule and ruleset."""
+    consumers = _get_attr(rule, "destinations") or []
+    providers = _get_attr(rule, "providers") or []
+    consumer_labels = _format_rule_labels_for_display(consumers, app_href, env_href, label_map)
+    provider_labels = _format_rule_labels_for_display(providers, app_href, env_href, label_map)
+    ingress = _get_attr(rule, "ingress_services") or []
+    return IllumioRuleSearchResult(
+        href=_get_attr(rule, "href", ""),
+        description=_get_attr(rule, "description"),
+        ruleset_name=_get_attr(rule_set, "name", "") if rule_set else "",
+        ruleset_href=_get_attr(rule_set, "href", "") if rule_set else "",
+        category=category,
+        unscoped_destinations=_get_attr(rule, "unscoped_destinations") is True,
+        consumer_labels=consumer_labels,
+        provider_labels=provider_labels,
+        ingress_services_summary=_parse_ingress_services_summary(ingress),
+    )
 
 
 def _ruleset_scope_matches(rule_set: Any, app: str, env: str, label_map: dict[str, tuple[str, str]]) -> bool:

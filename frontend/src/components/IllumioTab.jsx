@@ -12,7 +12,7 @@ export default function IllumioTab({ app, env }) {
   const [activeSubTab, setActiveSubTab] = useState('workloads')
   const [workloads, setWorkloads] = useState([])
   const [workloadsLoading, setWorkloadsLoading] = useState(false)
-  const [rulesets, setRulesets] = useState([])
+  const [rulesetData, setRulesetData] = useState({ application_rules: [], external_rules: [] })
   const [rulesetsLoading, setRulesetsLoading] = useState(false)
 
   useEffect(() => {
@@ -37,8 +37,13 @@ export default function IllumioTab({ app, env }) {
         { headers: { 'X-AD-Groups': '' } }
       )
         .then((res) => (res.ok ? res.json() : Promise.reject(new Error(res.status))))
-        .then((data) => setRulesets(data.rulesets || []))
-        .catch(() => setRulesets([]))
+        .then((data) =>
+          setRulesetData({
+            application_rules: data.application_rules || [],
+            external_rules: data.external_rules || [],
+          })
+        )
+        .catch(() => setRulesetData({ application_rules: [], external_rules: [] }))
         .finally(() => setRulesetsLoading(false))
     }
   }, [activeSubTab, app, env])
@@ -99,28 +104,65 @@ export default function IllumioTab({ app, env }) {
         {activeSubTab === 'ruleset' && (
           <div className="illumio-rulesets">
             {rulesetsLoading ? (
-              <div className="app-loading">Loading rulesets…</div>
+              <div className="app-loading">Loading rules…</div>
             ) : (
               <div className="illumio-rulesets-list">
-                {rulesets.length === 0 ? (
-                  <p>No rulesets found for this application.</p>
+                {rulesetData.application_rules.length === 0 &&
+                rulesetData.external_rules.length === 0 ? (
+                  <p>No rules found for this application.</p>
                 ) : (
-                  rulesets.map((rs) => (
-                    <details key={rs.href} className="illumio-ruleset">
-                      <summary>{rs.name}</summary>
-                      <ul className="illumio-rules">
-                        {rs.rules?.length === 0 ? (
-                          <li>No rules</li>
-                        ) : (
-                          rs.rules?.map((r) => (
-                            <li key={r.href}>
+                  <>
+                    {rulesetData.application_rules.length > 0 && (
+                      <section className="illumio-rules-section">
+                        <h4>Application rules</h4>
+                        <ul className="illumio-rules">
+                          {rulesetData.application_rules.map((r) => (
+                            <li key={r.href} className="illumio-rule">
+                              <span className="illumio-rule-badge">
+                                {r.category === 'application_inbound'
+                                  ? 'Inbound'
+                                  : 'Intra-scope'}
+                              </span>
                               {r.description || r.href}
+                              {r.ingress_services_summary && (
+                                <span className="illumio-rule-services">
+                                  {' '}({r.ingress_services_summary})
+                                </span>
+                              )}
+                              <div className="illumio-rule-labels">
+                                Consumer: {r.consumer_labels?.length ? r.consumer_labels.join(', ') : '—'}
+                                {' → '}Provider: {r.provider_labels?.length ? r.provider_labels.join(', ') : '—'}
+                              </div>
                             </li>
-                          ))
-                        )}
-                      </ul>
-                    </details>
-                  ))
+                          ))}
+                        </ul>
+                      </section>
+                    )}
+                    {rulesetData.external_rules.length > 0 && (
+                      <section className="illumio-rules-section">
+                        <h4>External rules</h4>
+                        <ul className="illumio-rules">
+                          {rulesetData.external_rules.map((r) => (
+                            <li key={r.href} className="illumio-rule">
+                              {r.description || r.href}
+                              {r.ingress_services_summary && (
+                                <span className="illumio-rule-services">
+                                  {' '}({r.ingress_services_summary})
+                                </span>
+                              )}
+                              {r.ruleset_name && (
+                                <span className="illumio-rule-ruleset"> — {r.ruleset_name}</span>
+                              )}
+                              <div className="illumio-rule-labels">
+                                Consumer: {r.consumer_labels?.length ? r.consumer_labels.join(', ') : '—'}
+                                {' → '}Provider: {r.provider_labels?.length ? r.provider_labels.join(', ') : '—'}
+                              </div>
+                            </li>
+                          ))}
+                        </ul>
+                      </section>
+                    )}
+                  </>
                 )}
               </div>
             )}

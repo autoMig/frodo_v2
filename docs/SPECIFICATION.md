@@ -143,6 +143,15 @@ Frodo enables application teams to view and manage firewall policies for their a
 
 ---
 
+## Logging
+
+- **LOG_LEVEL**: Environment variable (default: INFO). Use DEBUG for development/troubleshooting.
+- **Info**: Key operations (API fetches, cache refresh completion, rule search start/result counts).
+- **Debug**: Skipped operations (client not configured), per-call result counts, request/response details.
+- **Warning**: Failures, timeouts, missing labels, cache refresh failures.
+
+---
+
 ## Open Items
 
 - Exact AD group naming convention

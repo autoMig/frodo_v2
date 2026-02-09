@@ -65,6 +65,46 @@ class IllumioRulesetSummary(BaseModel):
     rules: list[IllumioRuleSummary] = Field(default_factory=list, description="Rules in this ruleset")
 
 
+class IllumioRuleSearchResult(BaseModel):
+    """Single rule from rule_search API, categorized for display."""
+    href: str = Field(..., description="Rule HREF")
+    description: str | None = Field(default=None, description="Rule description")
+    ruleset_name: str = Field(default="", description="Parent ruleset name")
+    ruleset_href: str = Field(default="", description="Parent ruleset HREF")
+    category: str = Field(
+        ...,
+        description="application_intrascope | application_inbound | external",
+    )
+    unscoped_destinations: bool = Field(
+        default=False,
+        description="When true, consumers can be outside scope (inbound rule)",
+    )
+    consumer_labels: list[str] = Field(
+        default_factory=list,
+        description="Formatted consumer (source) labels for display",
+    )
+    provider_labels: list[str] = Field(
+        default_factory=list,
+        description="Formatted provider (destination) labels for display",
+    )
+    ingress_services_summary: str = Field(
+        default="",
+        description="Summary of ports/protocols (e.g. TCP 3306)",
+    )
+
+
+class IllumioRulesetSearchResponse(BaseModel):
+    """Response for ruleset view using rule_search API."""
+    application_rules: list[IllumioRuleSearchResult] = Field(
+        default_factory=list,
+        description="Rules where scope matches app+env (intra-scope and inbound)",
+    )
+    external_rules: list[IllumioRuleSearchResult] = Field(
+        default_factory=list,
+        description="Rules from other applications that apply to this app+env",
+    )
+
+
 class IllumioTrafficFlow(BaseModel):
     """Simplified traffic flow for Traffic sub-tab."""
     src: str = Field(..., description="Source IP or hostname")
