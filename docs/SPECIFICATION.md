@@ -86,7 +86,7 @@ Frodo enables application teams to view and manage firewall policies for their a
 **Phase 2 Checklist**
 
 - [x] GET /api/applications/{app}/{env} (overview from cache)
-- [x] GET /api/applications/{app}/{env}/illumio/workloads
+- [x] GET /api/applications/{app}/{env}/illumio/workloads (real-time API, label-filtered, max 500)
 - [x] GET /api/applications/{app}/{env}/illumio/rulesets
 - [x] POST /api/applications/{app}/{env}/illumio/traffic (query builder)
 - [x] React Router with /applications/:app/:env
@@ -138,6 +138,8 @@ Frodo enables application teams to view and manage firewall policies for their a
 - **Auth**: API key/secret via illumio Python library
 - **Library**: illumio (PyPI)
 - **Workloads**: Match by hostname; labels for app/env
+- **Labels cache**: Labels fetched during cache refresh (parallel with workloads); used for workloads, ruleset, and traffic label resolution. New labels created in Illumio between refreshes are not available until next refresh.
+- **Workloads tab**: Real-time API with label filter (app+env); max 500 workloads per application; both managed and unmanaged workloads returned.
 
 ---
 

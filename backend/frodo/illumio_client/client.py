@@ -1,5 +1,5 @@
 """Illumio API client for workload and enforcement status."""
-import asyncio
+import json
 import logging
 import os
 import time
@@ -12,6 +12,7 @@ from frodo.models import (
     IllumioTrafficFlow,
     TrafficQueryRequest,
 )
+from frodo.unicorn.client import strip_app_name_suffix
 
 logger = logging.getLogger("frodo.illumio")
 
@@ -31,6 +32,7 @@ def _verify_ssl_default() -> bool:
 
 # Module-level cache: populated by background refresh only. Never fetch on read.
 _workloads_cache: dict[str, dict[str, Any]] | None = None
+_labels_cache: list[dict[str, Any]] | None = None
 
 # Illumio label keys for app, env, loc (configurable via config in future)
 ILLUMIO_APP_LABEL_KEY = "app"
@@ -141,6 +143,90 @@ class IllumioClient:
         except Exception as e:
             logger.warning("Illumio cache refresh failed, keeping previous: %s", e)
 
+    def refresh_labels_cache(self) -> None:
+        """
+        Fetch labels from Illumio PCE and update cache.
+        Called by background scheduler only. Uses async API if >500 labels.
+        """
+        if not self.pce_host or not self.api_key:
+            return
+
+        global _labels_cache
+        try:
+            logger.info("Illumio cache refresh: fetching labels from PCE %s", self.pce_host)
+            start = time.perf_counter()
+            labels = self._fetch_labels_from_api()
+            _labels_cache = labels
+            elapsed = time.perf_counter() - start
+            logger.info("Illumio labels cache refreshed: %d labels in %.1fs", len(labels), elapsed)
+        except Exception as e:
+            logger.warning("Illumio labels cache refresh failed, keeping previous: %s", e)
+
+    def _fetch_labels_from_api(self) -> list[dict[str, Any]]:
+        """Fetch all labels from Illumio PCE. Uses async API when >500 labels."""
+        pce = self._get_pce()
+        endpoint = f"/orgs/{self.org_id}/labels"
+        params: dict[str, Any] = {}
+        headers = {"Prefer": "respond-async"}
+        response = pce.get(endpoint, params=params, headers=headers, include_org=False)
+        response.raise_for_status()
+
+        if response.status_code == 200:
+            raw_labels = response.json()
+            items = raw_labels if isinstance(raw_labels, list) else (raw_labels or {}).get("items", [])
+            result: list[dict[str, Any]] = []
+            for lbl in items or []:
+                href = _get_attr(lbl, "href", "")
+                if href:
+                    result.append({
+                        "href": href,
+                        "key": _get_attr(lbl, "key", "") or "",
+                        "value": _get_attr(lbl, "value", "") or "",
+                    })
+            return result
+
+        if response.status_code == 202:
+            location = response.headers.get("Location", "")
+            retry_after = int(response.headers.get("Retry-After", "2"))
+            logger.info("Illumio labels: async job started, polling (retry_after=%ds)", retry_after)
+            poll_interval = float(retry_after)
+            poll_count = 0
+            while True:
+                time.sleep(poll_interval)
+                poll_interval = min(poll_interval * 1.5, 30)
+                poll_count += 1
+                poll_resp = pce.get(location)
+                poll_resp.raise_for_status()
+                poll_result = poll_resp.json()
+                poll_status = poll_result.get("status", "unknown")
+                logger.info("Illumio labels: job poll #%d, status=%s", poll_count, poll_status)
+                if poll_status == "failed":
+                    msg = poll_result.get("result", {}).get("message", str(poll_result))
+                    raise RuntimeError(f"Illumio labels async job failed: {msg}")
+                if poll_status in ("done", "completed"):
+                    collection_href = (
+                        poll_result.get("result", {}).get("href", "")
+                        or poll_result.get("result", "")
+                    )
+                    break
+            response = pce.get(collection_href)
+            response.raise_for_status()
+            raw_labels = response.json()
+        else:
+            raise RuntimeError(f"Unexpected labels response: {response.status_code}")
+
+        items = raw_labels if isinstance(raw_labels, list) else (raw_labels or {}).get("items", [])
+        result = []
+        for lbl in items or []:
+            href = _get_attr(lbl, "href", "")
+            if href:
+                result.append({
+                    "href": href,
+                    "key": _get_attr(lbl, "key", "") or "",
+                    "value": _get_attr(lbl, "value", "") or "",
+                })
+        return result
+
     def _fetch_workloads_from_api(self) -> dict[str, dict[str, Any]]:
         """Fetch workloads from Illumio PCE (used by refresh only). Uses async API with job status logging."""
         pce = self._get_pce()
@@ -189,42 +275,11 @@ class IllumioClient:
         else:
             raw_workloads = response.json()
 
-        def _get(obj: Any, key: str, default: Any = None) -> Any:
-            return obj.get(key, default) if isinstance(obj, dict) else getattr(obj, key, default)
-
         result: dict[str, dict[str, Any]] = {}
         for w in raw_workloads or []:
-            hostname = (_get(w, "hostname") or "").strip()
-            if not hostname:
-                continue
-            key = hostname.lower()
-
-            enforcement = _get(w, "enforcement_mode") or ""
-            if hasattr(enforcement, "value"):
-                enforcement = enforcement.value
-
-            labels = _get(w, "labels") or []
-            app_val = ""
-            env_val = ""
-            loc_val = ""
-            for lbl in labels:
-                lb_key = lbl.get("key", "") if isinstance(lbl, dict) else getattr(lbl, "key", "") or ""
-                lb_val = lbl.get("value", "") if isinstance(lbl, dict) else getattr(lbl, "value", "") or ""
-                if (lb_key or "").lower() == ILLUMIO_APP_LABEL_KEY:
-                    app_val = lb_val or ""
-                elif (lb_key or "").lower() == ILLUMIO_ENV_LABEL_KEY:
-                    env_val = lb_val or ""
-                elif (lb_key or "").lower() == ILLUMIO_LOC_LABEL_KEY:
-                    loc_val = lb_val or ""
-
-            result[key] = {
-                "hostname": hostname,
-                "enforcement_mode": str(enforcement) if enforcement else "",
-                "app_label": app_val,
-                "env_label": env_val,
-                "loc_label": loc_val,
-            }
-
+            parsed = _parse_workload_to_dict(w)
+            if parsed:
+                result[parsed["hostname"].lower()] = parsed
         return result
 
     def get_workloads_grouped_by_app_env(
@@ -268,6 +323,48 @@ class IllumioClient:
                 return workloads
         return []
 
+    def fetch_workloads_for_app_env_from_api(
+        self,
+        app: str,
+        env: str,
+        app_env_normalizer: callable = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Fetch workloads from Illumio API filtered by app+env labels.
+        Uses cached labels for href resolution. Max 500 workloads; both managed and unmanaged.
+        Returns empty list if labels not found in cache.
+        """
+        if not self.pce_host or not self.api_key:
+            return []
+
+        app_norm = (app or "").strip()
+        env_norm = (env or "").strip()
+        if app_env_normalizer:
+            app_norm, env_norm = app_env_normalizer(app_norm, env_norm)
+        else:
+            app_norm = strip_app_name_suffix(app_norm)
+            env_norm = _normalize_env_for_lookup(env_norm)
+
+        app_label = get_label_entry(ILLUMIO_APP_LABEL_KEY, app_norm)
+        env_label = get_label_entry(ILLUMIO_ENV_LABEL_KEY, env_norm)
+        if not app_label or not env_label:
+            return []
+
+        labels_param = json.dumps([[app_label, env_label]])
+        pce = self._get_pce()
+        try:
+            workloads = pce.workloads.get(params={"labels": labels_param, "max_results": 500})
+        except Exception as e:
+            logger.warning("Failed to fetch workloads for app=%s env=%s: %s", app, env, e)
+            return []
+
+        result: list[dict[str, Any]] = []
+        for w in workloads or []:
+            parsed = _parse_workload_to_dict(w)
+            if parsed:
+                result.append(parsed)
+        return result
+
     def get_rulesets_for_app_env(
         self,
         app: str,
@@ -283,20 +380,8 @@ class IllumioClient:
         if app_env_normalizer:
             app_norm, env_norm = app_env_normalizer(app_norm, env_norm)
 
+        label_map = get_label_map()
         pce = self._get_pce()
-        label_map: dict[str, tuple[str, str]] = {}
-        try:
-            labels = pce.labels.get(params={"max_results": 2000})
-            for lbl in labels or []:
-                href = _get_attr(lbl, "href", "")
-                if href:
-                    label_map[href] = (
-                        _get_attr(lbl, "key", "") or "",
-                        _get_attr(lbl, "value", "") or "",
-                    )
-        except Exception as e:
-            logger.debug("Could not fetch labels for scope matching: %s", e)
-
         try:
             rule_sets = pce.rule_sets.get(policy_version="active", params={"max_results": 500})
         except Exception as e:
@@ -356,10 +441,10 @@ class IllumioClient:
             policy_decisions = ["allowed", "blocked", "potentially_blocked", "unknown"]
 
         include_sources = _build_traffic_filters(
-            pce, query.source or f"{app}/{env}", app, env, app_env_normalizer
+            query.source or f"{app}/{env}", app, env, app_env_normalizer
         )
         include_destinations = _build_traffic_filters(
-            pce, query.destination or "any", app, env, app_env_normalizer
+            query.destination or "any", app, env, app_env_normalizer
         ) if query.destination else [[]]
 
         try:
@@ -400,6 +485,82 @@ def _get_attr(obj: Any, key: str, default: Any = None) -> Any:
     return getattr(obj, key, default)
 
 
+def get_label_href(key: str, value: str) -> str | None:
+    """Look up label href from cache. Returns None if cache empty or no match."""
+    entry = get_label_entry(key, value)
+    return entry.get("href") if entry else None
+
+
+def get_label_entry(key: str, value: str) -> dict[str, Any] | None:
+    """
+    Look up full label entry from cache by key and value (exact match, case-insensitive).
+    Caller must pass normalized value (strip Unicorn suffixes for app; _normalize_env for env).
+    Returns dict with href, key, value or None.
+    """
+    global _labels_cache
+    if not _labels_cache:
+        return None
+    key_lower = (key or "").lower()
+    value_upper = (value or "").strip().upper()
+    value_lower = (value or "").strip().lower()
+    for lbl in _labels_cache:
+        lbl_key = (lbl.get("key") or "").lower()
+        lbl_val = lbl.get("value") or ""
+        if lbl_key != key_lower:
+            continue
+        if key_lower == ILLUMIO_APP_LABEL_KEY:
+            if (lbl_val or "").strip().upper() == value_upper:
+                return dict(lbl)
+        else:
+            if (lbl_val or "").strip().lower() == value_lower:
+                return dict(lbl)
+    return None
+
+
+def get_label_map() -> dict[str, tuple[str, str]]:
+    """Build href -> (key, value) map from labels cache. Used by ruleset scope matching."""
+    global _labels_cache
+    if not _labels_cache:
+        return {}
+    result: dict[str, tuple[str, str]] = {}
+    for lbl in _labels_cache:
+        href = lbl.get("href")
+        if href:
+            result[href] = (lbl.get("key") or "", lbl.get("value") or "")
+    return result
+
+
+def _parse_workload_to_dict(w: Any) -> dict[str, Any] | None:
+    """Parse a raw workload object/dict into our standard format. Returns None if no hostname."""
+    hostname = (_get_attr(w, "hostname") or "").strip()
+    if not hostname:
+        return None
+
+    enforcement = _get_attr(w, "enforcement_mode") or ""
+    if hasattr(enforcement, "value"):
+        enforcement = enforcement.value
+
+    labels = _get_attr(w, "labels") or []
+    app_val = env_val = loc_val = ""
+    for lbl in labels:
+        lb_key = (_get_attr(lbl, "key") or "").lower()
+        lb_val = _get_attr(lbl, "value") or ""
+        if lb_key == ILLUMIO_APP_LABEL_KEY:
+            app_val = lb_val or ""
+        elif lb_key == ILLUMIO_ENV_LABEL_KEY:
+            env_val = lb_val or ""
+        elif lb_key == ILLUMIO_LOC_LABEL_KEY:
+            loc_val = lb_val or ""
+
+    return {
+        "hostname": hostname,
+        "enforcement_mode": str(enforcement) if enforcement else "",
+        "app_label": app_val,
+        "env_label": env_val,
+        "loc_label": loc_val,
+    }
+
+
 def _ruleset_scope_matches(rule_set: Any, app: str, env: str, label_map: dict[str, tuple[str, str]]) -> bool:
     """Check if ruleset scope includes app+env labels. label_map: href -> (key, value)."""
     scopes = _get_attr(rule_set, "scopes") or []
@@ -430,13 +591,12 @@ def _ruleset_scope_matches(rule_set: Any, app: str, env: str, label_map: dict[st
 
 
 def _build_traffic_filters(
-    pce,
     spec: str,
     default_app: str,
     default_env: str,
     app_env_normalizer: callable = None,
 ) -> list:
-    """Build include_sources or include_destinations from spec (app/env or IP)."""
+    """Build include_sources or include_destinations from spec (app/env or IP). Uses cached labels."""
     spec = (spec or "").strip().lower()
     if spec in ("any", ""):
         return [[]]
@@ -449,30 +609,21 @@ def _build_traffic_filters(
         app, env = (parts[0] or "").strip(), (parts[1] or "").strip()
     if app_env_normalizer:
         app, env = app_env_normalizer(app, env)
-    env = _normalize_env_for_lookup(env)
-    try:
-        labels = pce.labels.get(params={"max_results": 1000})
-        app_href = env_href = None
-        for lbl in labels or []:
-            k = _get_attr(lbl, "key", "").lower()
-            v = _get_attr(lbl, "value", "")
-            href = _get_attr(lbl, "href", "")
-            if k == ILLUMIO_APP_LABEL_KEY and (v or "").upper() == (app or "").upper():
-                app_href = href
-            elif k == ILLUMIO_ENV_LABEL_KEY and (v or "").lower() == (env or "").lower():
-                env_href = href
-        refs = []
-        if app_href:
-            from illumio.util.jsonutils import Reference
-            refs.append(Reference(href=app_href))
-        if env_href:
-            from illumio.util.jsonutils import Reference
-            refs.append(Reference(href=env_href))
-        if refs:
-            from illumio.explorer import TrafficQueryFilter
-            return [[TrafficQueryFilter(label=r) for r in refs]]
-    except Exception as e:
-        logger.debug("Could not resolve labels for traffic filter: %s", e)
+    else:
+        app = strip_app_name_suffix(app or "")
+        env = _normalize_env_for_lookup(env)
+    app_href = get_label_href(ILLUMIO_APP_LABEL_KEY, app)
+    env_href = get_label_href(ILLUMIO_ENV_LABEL_KEY, env)
+    refs = []
+    if app_href:
+        from illumio.util.jsonutils import Reference
+        refs.append(Reference(href=app_href))
+    if env_href:
+        from illumio.util.jsonutils import Reference
+        refs.append(Reference(href=env_href))
+    if refs:
+        from illumio.explorer import TrafficQueryFilter
+        return [[TrafficQueryFilter(label=r) for r in refs]]
     return [[]]
 
 

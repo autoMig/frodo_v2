@@ -88,10 +88,14 @@ async def _run_cache_refresh() -> None:
     illumio = _get_illumio_client()
 
     logger.info("Cache refresh: starting Unicorn fetch")
-    await unicorn.refresh_servers_cache()
     if illumio:
-        logger.info("Cache refresh: starting Illumio fetch")
-        await asyncio.to_thread(illumio.refresh_workloads_cache)
+        await asyncio.gather(
+            unicorn.refresh_servers_cache(),
+            asyncio.to_thread(illumio.refresh_workloads_cache),
+            asyncio.to_thread(illumio.refresh_labels_cache),
+        )
+    else:
+        await unicorn.refresh_servers_cache()
     logger.info("Cache refresh: complete")
 
 
@@ -200,7 +204,7 @@ async def get_illumio_workloads(
     env: str = Path(..., description="Environment code"),
     x_ad_groups: str | None = Header(default=None, alias="X-AD-Groups"),
 ):
-    """Get Illumio workloads for this application (from cache)."""
+    """Get Illumio workloads for this application (real-time from API, filtered by app/env labels)."""
     ad_groups = _get_ad_groups(x_ad_groups)
     service = _get_application_service()
     details = await service.get_application_details(app_name=app, env=env, ad_groups=ad_groups)
@@ -213,11 +217,20 @@ async def get_illumio_workloads(
     if not illumio:
         return {"workloads": []}
 
-    raw = illumio.get_workloads_for_app_env(
-        app=details.business_application_name,
-        env=details.environment,
-        app_env_normalizer=_illumio_app_env_normalizer,
-    )
+    timeout_sec = int(os.environ.get("ILLUMIO_WORKLOADS_FETCH_TIMEOUT_SECONDS", "60"))
+    try:
+        raw = await asyncio.wait_for(
+            asyncio.to_thread(
+                illumio.fetch_workloads_for_app_env_from_api,
+                details.business_application_name,
+                details.environment,
+                _illumio_app_env_normalizer,
+            ),
+            timeout=timeout_sec,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Illumio workloads request timed out")
+
     workloads = [
         {
             "hostname": w.get("hostname", ""),
