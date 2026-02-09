@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom'
 import './ApplicationCard.css';
 
 const FIREWALL_LABELS = {
@@ -47,8 +48,10 @@ function FirewallPill({ platform, illumioStatus }) {
 export default function ApplicationCard({ application }) {
   const { business_application_name, environment, server_count, firewalls, illumio_enforcement_status } = application;
   const displayName = `${business_application_name.toUpperCase()} | ${environment.toUpperCase()}`;
+  const to = `/applications/${encodeURIComponent(business_application_name)}/${encodeURIComponent(environment)}`;
 
   return (
+    <Link to={to} className="application-card-link">
     <article className="application-card">
       <div className="application-card__header">
         <h2 className="application-card__title">{displayName}</h2>
@@ -64,5 +67,6 @@ export default function ApplicationCard({ application }) {
         ))}
       </div>
     </article>
+    </Link>
   );
 }

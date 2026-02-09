@@ -1,3 +1,9 @@
+.application-card-link {
+  text-decoration: none;
+  color: inherit;
+  display: block;
+}
+
 .application-card {
   background: var(--card-bg, #1e293b);
   border-radius: 12px;

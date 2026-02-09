@@ -3,12 +3,16 @@ import asyncio
 import logging
 import os
 
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Path, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from frodo.config import setup_logging
 from frodo.illumio_client.client import IllumioClient
-from frodo.services.application_service import ApplicationService
+from frodo.models import FirewallPlatform, TrafficQueryRequest
+from frodo.services.application_service import (
+    ApplicationService,
+    _illumio_app_env_normalizer,
+)
 from frodo.unicorn.client import UnicornClient
 
 setup_logging()
@@ -161,3 +165,124 @@ async def get_applications(
     except Exception as e:
         logger.exception("Failed to fetch applications")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _get_ad_groups(x_ad_groups: str | None) -> list[str]:
+    if os.environ.get("BYPASS_AD_FILTER", "").strip().lower() in ("true", "1", "yes"):
+        return []
+    if x_ad_groups:
+        return [g.strip() for g in x_ad_groups.split(",") if g.strip()]
+    return []
+
+
+@app.get("/api/applications/{app}/{env}")
+async def get_application_details(
+    app: str = Path(..., description="Business application name"),
+    env: str = Path(..., description="Environment code"),
+    x_ad_groups: str | None = Header(default=None, alias="X-AD-Groups"),
+):
+    """Get application details (overview) from cache: hosts, firewalls."""
+    ad_groups = _get_ad_groups(x_ad_groups)
+    service = _get_application_service()
+    details = await service.get_application_details(
+        app_name=app,
+        env=env,
+        ad_groups=ad_groups,
+    )
+    if not details:
+        raise HTTPException(status_code=404, detail="Application not found")
+    return details.model_dump()
+
+
+@app.get("/api/applications/{app}/{env}/illumio/workloads")
+async def get_illumio_workloads(
+    app: str = Path(..., description="Business application name"),
+    env: str = Path(..., description="Environment code"),
+    x_ad_groups: str | None = Header(default=None, alias="X-AD-Groups"),
+):
+    """Get Illumio workloads for this application (from cache)."""
+    ad_groups = _get_ad_groups(x_ad_groups)
+    service = _get_application_service()
+    details = await service.get_application_details(app_name=app, env=env, ad_groups=ad_groups)
+    if not details:
+        raise HTTPException(status_code=404, detail="Application not found")
+    if FirewallPlatform.ILLUMIO not in details.firewalls:
+        raise HTTPException(status_code=404, detail="Illumio does not apply to this application")
+
+    illumio = _get_illumio_client()
+    if not illumio:
+        return {"workloads": []}
+
+    raw = illumio.get_workloads_for_app_env(
+        app=details.business_application_name,
+        env=details.environment,
+        app_env_normalizer=_illumio_app_env_normalizer,
+    )
+    workloads = [
+        {
+            "hostname": w.get("hostname", ""),
+            "enforcement_mode": w.get("enforcement_mode", ""),
+            "app_label": w.get("app_label", ""),
+            "env_label": w.get("env_label", ""),
+            "loc_label": w.get("loc_label", ""),
+        }
+        for w in raw
+    ]
+    return {"workloads": workloads}
+
+
+@app.get("/api/applications/{app}/{env}/illumio/rulesets")
+async def get_illumio_rulesets(
+    app: str = Path(..., description="Business application name"),
+    env: str = Path(..., description="Environment code"),
+    x_ad_groups: str | None = Header(default=None, alias="X-AD-Groups"),
+):
+    """Get Illumio rulesets and rules for this application."""
+    ad_groups = _get_ad_groups(x_ad_groups)
+    service = _get_application_service()
+    details = await service.get_application_details(app_name=app, env=env, ad_groups=ad_groups)
+    if not details:
+        raise HTTPException(status_code=404, detail="Application not found")
+    if FirewallPlatform.ILLUMIO not in details.firewalls:
+        raise HTTPException(status_code=404, detail="Illumio does not apply to this application")
+
+    illumio = _get_illumio_client()
+    if not illumio:
+        return {"rulesets": []}
+
+    rulesets = illumio.get_rulesets_for_app_env(
+        app=details.business_application_name,
+        env=details.environment,
+        app_env_normalizer=_illumio_app_env_normalizer,
+    )
+    return {"rulesets": [r.model_dump() for r in rulesets]}
+
+
+@app.post("/api/applications/{app}/{env}/illumio/traffic")
+async def post_illumio_traffic(
+    app: str = Path(..., description="Business application name"),
+    env: str = Path(..., description="Environment code"),
+    query: TrafficQueryRequest = ...,
+    x_ad_groups: str | None = Header(default=None, alias="X-AD-Groups"),
+):
+    """Run traffic query for this application and return flows."""
+    ad_groups = _get_ad_groups(x_ad_groups)
+    service = _get_application_service()
+    details = await service.get_application_details(app_name=app, env=env, ad_groups=ad_groups)
+    if not details:
+        raise HTTPException(status_code=404, detail="Application not found")
+    if FirewallPlatform.ILLUMIO not in details.firewalls:
+        raise HTTPException(status_code=404, detail="Illumio does not apply to this application")
+
+    illumio = _get_illumio_client()
+    if not illumio:
+        return {"flows": []}
+
+    flows = await asyncio.to_thread(
+        illumio.get_traffic_flows,
+        details.business_application_name,
+        details.environment,
+        query,
+        _illumio_app_env_normalizer,
+    )
+    return {"flows": [f.model_dump() for f in flows]}

@@ -1,0 +1,85 @@
+.illumio-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.illumio-subtabs {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.illumio-subtab {
+  padding: 0.5rem 1rem;
+  font-size: 0.9rem;
+  border: 1px solid var(--card-border, #334155);
+  border-radius: 0.375rem;
+  background: var(--card-bg, #1e293b);
+  color: var(--text-muted, #94a3b8);
+  cursor: pointer;
+}
+
+.illumio-subtab:hover {
+  color: var(--text-primary, #f8fafc);
+}
+
+.illumio-subtab--active {
+  background: var(--pill-bg, #334155);
+  color: var(--text-primary, #f8fafc);
+}
+
+.illumio-subtab-content {
+  background: var(--card-bg, #1e293b);
+  border-radius: 12px;
+  padding: 1.25rem 1.5rem;
+  border: 1px solid var(--card-border, #334155);
+}
+
+.illumio-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.illumio-table th,
+.illumio-table td {
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+  border: 1px solid var(--card-border, #334155);
+}
+
+.illumio-table th {
+  background: rgba(0, 0, 0, 0.2);
+  color: var(--text-muted, #94a3b8);
+  font-weight: 600;
+}
+
+.illumio-table td {
+  color: var(--text-primary, #f8fafc);
+}
+
+.illumio-rulesets-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.illumio-ruleset {
+  border: 1px solid var(--card-border, #334155);
+  border-radius: 0.375rem;
+  padding: 0.75rem 1rem;
+}
+
+.illumio-ruleset summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--text-primary, #f8fafc);
+}
+
+.illumio-rules {
+  margin: 0.75rem 0 0 1.5rem;
+  padding: 0;
+  list-style: disc;
+  color: var(--text-muted, #94a3b8);
+  font-size: 0.9rem;
+}

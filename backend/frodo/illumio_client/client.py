@@ -1,12 +1,27 @@
 """Illumio API client for workload and enforcement status."""
+import asyncio
 import logging
 import os
 import time
 from typing import Any
 
-from frodo.models import IllumioEnforcementStatus
+from frodo.models import (
+    IllumioEnforcementStatus,
+    IllumioRuleSummary,
+    IllumioRulesetSummary,
+    IllumioTrafficFlow,
+    TrafficQueryRequest,
+)
 
 logger = logging.getLogger("frodo.illumio")
+
+
+def _get_traffic_exclude_ports() -> set[int]:
+    """Parse ILLUMIO_TRAFFIC_EXCLUDE_PORTS env var."""
+    raw = os.environ.get("ILLUMIO_TRAFFIC_EXCLUDE_PORTS", "53,80,443,5353").strip()
+    if not raw:
+        return set()
+    return {int(p.strip()) for p in raw.split(",") if p.strip().isdigit()}
 
 
 def _verify_ssl_default() -> bool:
@@ -17,9 +32,10 @@ def _verify_ssl_default() -> bool:
 # Module-level cache: populated by background refresh only. Never fetch on read.
 _workloads_cache: dict[str, dict[str, Any]] | None = None
 
-# Illumio label keys for app and env (configurable via config in future)
+# Illumio label keys for app, env, loc (configurable via config in future)
 ILLUMIO_APP_LABEL_KEY = "app"
 ILLUMIO_ENV_LABEL_KEY = "env"
+ILLUMIO_LOC_LABEL_KEY = "loc"
 
 # Illumio enforcement mode values
 ILLUMIO_ENFORCED = "full"
@@ -190,6 +206,7 @@ class IllumioClient:
             labels = _get(w, "labels") or []
             app_val = ""
             env_val = ""
+            loc_val = ""
             for lbl in labels:
                 lb_key = lbl.get("key", "") if isinstance(lbl, dict) else getattr(lbl, "key", "") or ""
                 lb_val = lbl.get("value", "") if isinstance(lbl, dict) else getattr(lbl, "value", "") or ""
@@ -197,12 +214,15 @@ class IllumioClient:
                     app_val = lb_val or ""
                 elif (lb_key or "").lower() == ILLUMIO_ENV_LABEL_KEY:
                     env_val = lb_val or ""
+                elif (lb_key or "").lower() == ILLUMIO_LOC_LABEL_KEY:
+                    loc_val = lb_val or ""
 
             result[key] = {
                 "hostname": hostname,
                 "enforcement_mode": str(enforcement) if enforcement else "",
                 "app_label": app_val,
                 "env_label": env_val,
+                "loc_label": loc_val,
             }
 
         return result
@@ -233,3 +253,255 @@ class IllumioClient:
             grouped[key].append(w)
 
         return grouped
+
+    def get_workloads_for_app_env(
+        self,
+        app: str,
+        env: str,
+        app_env_normalizer: callable = None,
+    ) -> list[dict[str, Any]]:
+        """Get workloads for a specific app+env from cache."""
+        grouped = self.get_workloads_grouped_by_app_env(app_env_normalizer=app_env_normalizer)
+        key = (app.strip(), _normalize_env_for_lookup(env))
+        for (a, e), workloads in grouped.items():
+            if (a or "").strip().upper() == (key[0] or "").upper() and (e or "").lower() == (key[1] or "").lower():
+                return workloads
+        return []
+
+    def get_rulesets_for_app_env(
+        self,
+        app: str,
+        env: str,
+        app_env_normalizer: callable = None,
+    ) -> list[IllumioRulesetSummary]:
+        """Fetch rulesets that apply to app+env, with their rules."""
+        if not self.pce_host or not self.api_key:
+            return []
+
+        app_norm = (app or "").strip()
+        env_norm = _normalize_env_for_lookup(env)
+        if app_env_normalizer:
+            app_norm, env_norm = app_env_normalizer(app_norm, env_norm)
+
+        pce = self._get_pce()
+        label_map: dict[str, tuple[str, str]] = {}
+        try:
+            labels = pce.labels.get(params={"max_results": 2000})
+            for lbl in labels or []:
+                href = _get_attr(lbl, "href", "")
+                if href:
+                    label_map[href] = (
+                        _get_attr(lbl, "key", "") or "",
+                        _get_attr(lbl, "value", "") or "",
+                    )
+        except Exception as e:
+            logger.debug("Could not fetch labels for scope matching: %s", e)
+
+        try:
+            rule_sets = pce.rule_sets.get(policy_version="active", params={"max_results": 500})
+        except Exception as e:
+            logger.warning("Failed to fetch rulesets: %s", e)
+            return []
+
+        result: list[IllumioRulesetSummary] = []
+        for rs in rule_sets or []:
+            if not _ruleset_scope_matches(rs, app_norm, env_norm, label_map):
+                continue
+            href = _get_attr(rs, "href", "")
+            name = _get_attr(rs, "name", "")
+            rules: list[IllumioRuleSummary] = []
+            try:
+                rules_data = pce.rules.get(parent=href, policy_version="active")
+                for r in rules_data or []:
+                    rules.append(
+                        IllumioRuleSummary(
+                            href=_get_attr(r, "href", ""),
+                            description=_get_attr(r, "description"),
+                        )
+                    )
+            except Exception as e:
+                logger.debug("Failed to fetch rules for ruleset %s: %s", href, e)
+            result.append(
+                IllumioRulesetSummary(name=name, href=href, rules=rules)
+            )
+        return result
+
+    def get_traffic_flows(
+        self,
+        app: str,
+        env: str,
+        query: TrafficQueryRequest,
+        app_env_normalizer: callable = None,
+    ) -> list[IllumioTrafficFlow]:
+        """Run traffic query and return flows. Uses asyncio.to_thread for sync PCE call."""
+        if not self.pce_host or not self.api_key:
+            return []
+
+        pce = self._get_pce()
+        exclude_ports = _get_traffic_exclude_ports()
+
+        include_services = []
+        ports_to_exclude = exclude_ports - {query.port} if query.port is not None else exclude_ports
+        exclude_services = [{"port": p, "proto": "tcp"} for p in ports_to_exclude]
+        exclude_services += [{"port": p, "proto": "udp"} for p in ports_to_exclude]
+        if query.port is not None:
+            proto = 6 if (query.protocol or "").lower() == "tcp" else 17
+            include_services.append({"port": query.port, "proto": proto})
+
+        policy_decisions = [
+            pd for pd in (query.policy_decisions or [])
+            if pd in ("allowed", "blocked", "potentially_blocked", "unknown")
+        ]
+        if not policy_decisions:
+            policy_decisions = ["allowed", "blocked", "potentially_blocked", "unknown"]
+
+        include_sources = _build_traffic_filters(
+            pce, query.source or f"{app}/{env}", app, env, app_env_normalizer
+        )
+        include_destinations = _build_traffic_filters(
+            pce, query.destination or "any", app, env, app_env_normalizer
+        ) if query.destination else [[]]
+
+        try:
+            from illumio.explorer import TrafficQuery
+
+            traffic_query = TrafficQuery.build(
+                start_date=query.start_date,
+                end_date=query.end_date,
+                include_sources=include_sources,
+                exclude_sources=[],
+                include_destinations=include_destinations,
+                exclude_destinations=[],
+                include_services=include_services if include_services else [],
+                exclude_services=exclude_services,
+                policy_decisions=policy_decisions,
+            )
+            flows = pce.get_traffic_flows_async(
+                query_name=f"frodo-{app}-{env}",
+                traffic_query=traffic_query,
+            )
+        except Exception as e:
+            logger.warning("Traffic query failed: %s", e)
+            return []
+
+        return [_traffic_flow_to_model(f) for f in (flows or [])]
+
+
+def _normalize_env_for_lookup(env: str) -> str:
+    raw = (env or "").strip().lower() or "unknown"
+    if raw == "contingency":
+        return "production"
+    return raw
+
+
+def _get_attr(obj: Any, key: str, default: Any = None) -> Any:
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _ruleset_scope_matches(rule_set: Any, app: str, env: str, label_map: dict[str, tuple[str, str]]) -> bool:
+    """Check if ruleset scope includes app+env labels. label_map: href -> (key, value)."""
+    scopes = _get_attr(rule_set, "scopes") or []
+    if not scopes:
+        return True
+    app_upper = (app or "").upper()
+    env_lower = (env or "").lower()
+    for scope in scopes:
+        label_refs = _get_attr(scope, "label") or _get_attr(scope, "labels") or []
+        if isinstance(label_refs, dict):
+            label_refs = [label_refs]
+        if not label_refs:
+            return True
+        app_match = env_match = False
+        for lbl in label_refs:
+            href = _get_attr(lbl, "href", "") if isinstance(lbl, dict) else _get_attr(lbl, "href", "")
+            key, value = label_map.get(href, ("", ""))
+            if not key and href:
+                key = _get_attr(lbl, "key", "") if isinstance(lbl, dict) else _get_attr(lbl, "key", "")
+                value = _get_attr(lbl, "value", "") if isinstance(lbl, dict) else _get_attr(lbl, "value", "")
+            if (key or "").lower() == ILLUMIO_APP_LABEL_KEY:
+                app_match = (value or "").upper() == app_upper
+            elif (key or "").lower() == ILLUMIO_ENV_LABEL_KEY:
+                env_match = (value or "").lower() == env_lower
+        if app_match and env_match:
+            return True
+    return False
+
+
+def _build_traffic_filters(
+    pce,
+    spec: str,
+    default_app: str,
+    default_env: str,
+    app_env_normalizer: callable = None,
+) -> list:
+    """Build include_sources or include_destinations from spec (app/env or IP)."""
+    spec = (spec or "").strip().lower()
+    if spec in ("any", ""):
+        return [[]]
+    if _looks_like_ip(spec):
+        from illumio.explorer import TrafficQueryFilter
+        return [[TrafficQueryFilter(ip_address=spec)]]
+    app, env = default_app, default_env
+    if "/" in spec:
+        parts = spec.split("/", 1)
+        app, env = (parts[0] or "").strip(), (parts[1] or "").strip()
+    if app_env_normalizer:
+        app, env = app_env_normalizer(app, env)
+    env = _normalize_env_for_lookup(env)
+    try:
+        labels = pce.labels.get(params={"max_results": 1000})
+        app_href = env_href = None
+        for lbl in labels or []:
+            k = _get_attr(lbl, "key", "").lower()
+            v = _get_attr(lbl, "value", "")
+            href = _get_attr(lbl, "href", "")
+            if k == ILLUMIO_APP_LABEL_KEY and (v or "").upper() == (app or "").upper():
+                app_href = href
+            elif k == ILLUMIO_ENV_LABEL_KEY and (v or "").lower() == (env or "").lower():
+                env_href = href
+        refs = []
+        if app_href:
+            from illumio.util.jsonutils import Reference
+            refs.append(Reference(href=app_href))
+        if env_href:
+            from illumio.util.jsonutils import Reference
+            refs.append(Reference(href=env_href))
+        if refs:
+            from illumio.explorer import TrafficQueryFilter
+            return [[TrafficQueryFilter(label=r) for r in refs]]
+    except Exception as e:
+        logger.debug("Could not resolve labels for traffic filter: %s", e)
+    return [[]]
+
+
+def _looks_like_ip(spec: str) -> bool:
+    import re
+    return bool(re.match(r"^[\d.]+(\/\d+)?$", (spec or "").strip()))
+
+
+def _traffic_flow_to_model(flow: Any) -> IllumioTrafficFlow:
+    src = dst = "?"
+    port = None
+    proto = None
+    policy_decision = getattr(flow, "policy_decision", None) or "unknown"
+    num_connections = getattr(flow, "num_connections", 0) or 0
+    if hasattr(flow, "src") and flow.src:
+        s = flow.src
+        src = getattr(s, "ip", None) or getattr(s, "hostname", None) or str(s)
+    if hasattr(flow, "dst") and flow.dst:
+        d = flow.dst
+        dst = getattr(d, "ip", None) or getattr(d, "hostname", None) or str(d)
+    if hasattr(flow, "service") and flow.service:
+        port = getattr(flow.service, "port", None)
+        proto_num = getattr(flow.service, "proto", None)
+        proto = "tcp" if proto_num == 6 else ("udp" if proto_num == 17 else str(proto_num))
+    return IllumioTrafficFlow(
+        src=str(src),
+        dst=str(dst),
+        port=port,
+        protocol=proto,
+        policy_decision=str(policy_decision) if policy_decision else "unknown",
+        num_connections=int(num_connections) if num_connections else 0,
+    )

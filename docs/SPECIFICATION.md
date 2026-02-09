@@ -1,6 +1,6 @@
 # Frodo - Firewall Operations & Definition Orchestration
 
-## Current Phase: Phase 1 - Application Summary
+## Current Phase: Phase 2 - Illumio Details
 
 ---
 
@@ -56,7 +56,7 @@ Frodo enables application teams to view and manage firewall policies for their a
 
 ## Phased Implementation
 
-### Phase 1 - Application Summary (Read-only) [CURRENT]
+### Phase 1 - Application Summary (Read-only)
 
 **Goal**: Application teams see which firewalls apply to their applications.
 
@@ -75,10 +75,23 @@ Frodo enables application teams to view and manage firewall policies for their a
 - [x] Configurable logging
 - [x] Docker setup
 
-### Phase 2 - Illumio Details (Read-only)
+### Phase 2 - Illumio Details (Read-only) [CURRENT]
 
-- View Illumio ruleset for the application
-- View Illumio traffic report for the application
+- Application details view (click card to open)
+- Overview tab: hosts, firewalls (from cache)
+- Illumio tab with Workloads, Ruleset, Traffic sub-tabs
+- Traffic query builder: source, destination, port, duration, action
+- NSX and Checkpoint placeholder tabs
+
+**Phase 2 Checklist**
+
+- [x] GET /api/applications/{app}/{env} (overview from cache)
+- [x] GET /api/applications/{app}/{env}/illumio/workloads
+- [x] GET /api/applications/{app}/{env}/illumio/rulesets
+- [x] POST /api/applications/{app}/{env}/illumio/traffic (query builder)
+- [x] React Router with /applications/:app/:env
+- [x] Application details view with tabs
+- [x] Overview tab, Illumio tab (Workloads/Ruleset/Traffic), NSX/Checkpoint placeholders
 
 ### Phase 3 - NSX Details (Read-only)
 

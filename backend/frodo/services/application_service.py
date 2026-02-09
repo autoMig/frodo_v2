@@ -6,7 +6,12 @@ from frodo.illumio_client.client import (
     get_enforcement_status,
     IllumioClient,
 )
-from frodo.models import ApplicationSummary, FirewallPlatform, IllumioEnforcementStatus
+from frodo.models import (
+    ApplicationDetails,
+    ApplicationSummary,
+    FirewallPlatform,
+    IllumioEnforcementStatus,
+)
 from frodo.unicorn.client import (
     get_firewall_applicability,
     strip_app_name_suffix,
@@ -118,7 +123,7 @@ class ApplicationService:
                 )
 
         # Get Illumio enforcement status for apps that have Illumio
-        illumio_status: dict[tuple[str, str], IllumioEnforcementStatus] = {}
+        illumio_status_by_app_env: dict[tuple[str, str], IllumioEnforcementStatus] = {}
         if self.illumio:
             workloads_by_app_env = self.illumio.get_workloads_grouped_by_app_env(
                 app_env_normalizer=_illumio_app_env_normalizer,
@@ -131,7 +136,7 @@ class ApplicationService:
                     if hn:
                         hostnames.add(hn.lower())
                 app_env_to_hostnames[(app, env)] = hostnames
-            illumio_status = get_enforcement_status(app_env_to_hostnames, workloads_by_app_env)
+            illumio_status_by_app_env = get_enforcement_status(app_env_to_hostnames, workloads_by_app_env)
 
         summaries: list[ApplicationSummary] = []
         for (app_name, env_code), server_list in app_env_to_servers.items():
@@ -141,7 +146,7 @@ class ApplicationService:
 
             illumio_status_val = None
             if FirewallPlatform.ILLUMIO in all_firewalls:
-                illumio_status_val = illumio_status.get(
+                illumio_status_val = illumio_status_by_app_env.get(
                     (app_name, env_code),
                     IllumioEnforcementStatus.NOT_ENFORCED,
                 )
@@ -189,6 +194,82 @@ class ApplicationService:
         paginated = filtered[start:end]
 
         return (paginated, total_count)
+
+    async def get_application_details(
+        self,
+        app_name: str,
+        env: str,
+        ad_groups: list[str],
+    ) -> ApplicationDetails | None:
+        """
+        Get application details from cache (hosts, firewalls).
+        Returns None if app not found or not authorized.
+        """
+        servers = await self.unicorn.get_servers()
+        if not servers:
+            return None
+
+        app_env_to_servers: dict[tuple[str, str], list[dict]] = defaultdict(list)
+        for server in servers:
+            env_code = _get_env_name(server)
+            for app_name_raw in set(_get_app_names_from_services(server)):
+                app_norm = strip_app_name_suffix(app_name_raw)
+                key = (app_norm, env_code)
+                app_env_to_servers[key].append(server)
+
+        app_norm = strip_app_name_suffix((app_name or "").strip())
+        env_norm = _normalize_env((env or "").strip())
+        key = (app_norm.upper(), env_norm)
+
+        # Match key - keys use normalized env but app may be mixed case in Unicorn
+        matching_key = None
+        for (a, e), _ in app_env_to_servers.items():
+            if a.upper() == app_norm.upper() and e == env_norm:
+                matching_key = (a, e)
+                break
+        if not matching_key:
+            return None
+
+        # AD group filter (case-insensitive app match)
+        allowed_app_envs = _expand_allowed_app_envs(ad_groups)
+        if allowed_app_envs:
+            key_for_auth = (matching_key[0].upper(), matching_key[1])
+            if key_for_auth not in allowed_app_envs:
+                return None
+
+        server_list = app_env_to_servers[matching_key]
+        all_firewalls: set[FirewallPlatform] = set()
+        for s in server_list:
+            all_firewalls.update(get_firewall_applicability(s))
+
+        hosts = sorted(
+            (s.get("hostname") or "").strip()
+            for s in server_list
+            if (s.get("hostname") or "").strip()
+        )
+
+        # Illumio status if applicable
+        illumio_status_val = None
+        if FirewallPlatform.ILLUMIO in all_firewalls and self.illumio:
+            workloads_by_app_env = self.illumio.get_workloads_grouped_by_app_env(
+                app_env_normalizer=_illumio_app_env_normalizer,
+            )
+            hostnames = set(h.lower() for h in hosts)
+            app_env_to_hostnames = {matching_key: hostnames}
+            illumio_status_by_app_env = get_enforcement_status(
+                app_env_to_hostnames, workloads_by_app_env
+            )
+            illumio_status_val = illumio_status_by_app_env.get(
+                matching_key, IllumioEnforcementStatus.NOT_ENFORCED
+            )
+
+        return ApplicationDetails(
+            business_application_name=matching_key[0],
+            environment=matching_key[1],
+            hosts=hosts,
+            firewalls=sorted(all_firewalls, key=lambda f: f.value),
+            illumio_enforcement_status=illumio_status_val,
+        )
 
 
 def _expand_allowed_app_envs(ad_groups: list[str]) -> set[tuple[str, str]] | None:
