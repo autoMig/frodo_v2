@@ -75,17 +75,29 @@ class IllumioRuleSearchResult(BaseModel):
         ...,
         description="application_intrascope | application_inbound | external",
     )
-    unscoped_destinations: bool = Field(
+    rule_type_display: str = Field(
+        default="",
+        description="Internal | Inbound | External for table display",
+    )
+    unscoped_consumers: bool = Field(
         default=False,
         description="When true, consumers can be outside scope (inbound rule)",
     )
+    source_labels: list[str] = Field(
+        default_factory=list,
+        description="Source (consumer) labels with scope merged per rule type",
+    )
+    destination_labels: list[str] = Field(
+        default_factory=list,
+        description="Destination (provider) labels with scope merged per rule type",
+    )
     consumer_labels: list[str] = Field(
         default_factory=list,
-        description="Formatted consumer (source) labels for display",
+        description="Consumer labels from rule (kept for backward compat)",
     )
     provider_labels: list[str] = Field(
         default_factory=list,
-        description="Formatted provider (destination) labels for display",
+        description="Provider labels from rule (kept for backward compat)",
     )
     ingress_services_summary: str = Field(
         default="",

@@ -115,51 +115,71 @@ export default function IllumioTab({ app, env }) {
                     {rulesetData.application_rules.length > 0 && (
                       <section className="illumio-rules-section">
                         <h4>Application rules</h4>
-                        <ul className="illumio-rules">
-                          {rulesetData.application_rules.map((r) => (
-                            <li key={r.href} className="illumio-rule">
-                              <span className="illumio-rule-badge">
-                                {r.category === 'application_inbound'
-                                  ? 'Inbound'
-                                  : 'Intra-scope'}
-                              </span>
-                              {r.description || r.href}
-                              {r.ingress_services_summary && (
-                                <span className="illumio-rule-services">
-                                  {' '}({r.ingress_services_summary})
-                                </span>
-                              )}
-                              <div className="illumio-rule-labels">
-                                Consumer: {r.consumer_labels?.length ? r.consumer_labels.join(', ') : '—'}
-                                {' → '}Provider: {r.provider_labels?.length ? r.provider_labels.join(', ') : '—'}
-                              </div>
-                            </li>
-                          ))}
-                        </ul>
+                        <div className="illumio-rules-table-wrapper">
+                          <table className="illumio-table illumio-rules-table">
+                            <thead>
+                              <tr>
+                                <th>Ruleset Name</th>
+                                <th>Rule Type</th>
+                                <th>Source</th>
+                                <th>Destination</th>
+                                <th>Port/Protocol</th>
+                                <th>Description</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {rulesetData.application_rules.map((r) => (
+                                <tr key={r.href}>
+                                  <td>{r.ruleset_name || '—'}</td>
+                                  <td>
+                                    <span className="illumio-rule-badge">
+                                      {r.rule_type_display || (r.category === 'application_inbound' ? 'Inbound' : 'Internal')}
+                                    </span>
+                                  </td>
+                                  <td>{r.source_labels?.length ? r.source_labels.join(', ') : '—'}</td>
+                                  <td>{r.destination_labels?.length ? r.destination_labels.join(', ') : '—'}</td>
+                                  <td>{r.ingress_services_summary || '—'}</td>
+                                  <td>{r.description || '—'}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
                       </section>
                     )}
                     {rulesetData.external_rules.length > 0 && (
                       <section className="illumio-rules-section">
                         <h4>External rules</h4>
-                        <ul className="illumio-rules">
-                          {rulesetData.external_rules.map((r) => (
-                            <li key={r.href} className="illumio-rule">
-                              {r.description || r.href}
-                              {r.ingress_services_summary && (
-                                <span className="illumio-rule-services">
-                                  {' '}({r.ingress_services_summary})
-                                </span>
-                              )}
-                              {r.ruleset_name && (
-                                <span className="illumio-rule-ruleset"> — {r.ruleset_name}</span>
-                              )}
-                              <div className="illumio-rule-labels">
-                                Consumer: {r.consumer_labels?.length ? r.consumer_labels.join(', ') : '—'}
-                                {' → '}Provider: {r.provider_labels?.length ? r.provider_labels.join(', ') : '—'}
-                              </div>
-                            </li>
-                          ))}
-                        </ul>
+                        <div className="illumio-rules-table-wrapper">
+                          <table className="illumio-table illumio-rules-table">
+                            <thead>
+                              <tr>
+                                <th>Ruleset Name</th>
+                                <th>Rule Type</th>
+                                <th>Source</th>
+                                <th>Destination</th>
+                                <th>Port/Protocol</th>
+                                <th>Description</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {rulesetData.external_rules.map((r) => (
+                                <tr key={r.href}>
+                                  <td>{r.ruleset_name || '—'}</td>
+                                  <td>
+                                    <span className="illumio-rule-badge">
+                                      {r.rule_type_display || 'External'}
+                                    </span>
+                                  </td>
+                                  <td>{r.source_labels?.length ? r.source_labels.join(', ') : '—'}</td>
+                                  <td>{r.destination_labels?.length ? r.destination_labels.join(', ') : '—'}</td>
+                                  <td>{r.ingress_services_summary || '—'}</td>
+                                  <td>{r.description || '—'}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
                       </section>
                     )}
                   </>

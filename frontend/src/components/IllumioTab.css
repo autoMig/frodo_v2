@@ -90,45 +90,24 @@
   color: var(--text-primary, #f8fafc);
 }
 
-.illumio-rules {
-  margin: 0 0 0 1.5rem;
-  padding: 0;
-  list-style: disc;
-  color: var(--text-muted, #94a3b8);
-  font-size: 0.9rem;
+.illumio-rules-table-wrapper {
+  overflow-x: auto;
 }
 
-.illumio-rule {
-  margin-bottom: 0.75rem;
+.illumio-rules-table {
+  min-width: 800px;
 }
 
-.illumio-rule:last-child {
-  margin-bottom: 0;
+.illumio-rules-table td {
+  vertical-align: top;
 }
 
 .illumio-rule-badge {
   display: inline-block;
-  margin-right: 0.5rem;
   padding: 0.15rem 0.4rem;
   font-size: 0.7rem;
   font-weight: 600;
   border-radius: 0.25rem;
   background: var(--pill-bg, #334155);
   color: var(--text-primary, #f8fafc);
-}
-
-.illumio-rule-services {
-  color: var(--text-muted, #94a3b8);
-  font-size: 0.85rem;
-}
-
-.illumio-rule-labels {
-  margin-top: 0.25rem;
-  font-size: 0.8rem;
-  color: var(--text-muted, #64748b);
-}
-
-.illumio-rule-ruleset {
-  color: var(--text-muted, #64748b);
-  font-style: italic;
 }

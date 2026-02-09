@@ -470,7 +470,7 @@ class IllumioClient:
         seen_hrefs: set[str] = set()
 
         for body_key, body_value in [
-            ("destinations", label_actors),  # consumer (source)
+            ("consumers", label_actors),  # consumer (source)
             ("providers", label_actors),    # provider (destination)
         ]:
             body: dict[str, Any] = {body_key: body_value, "max_results": 500}
@@ -499,7 +499,7 @@ class IllumioClient:
             if not scope_matches:
                 category = "external"
             else:
-                unscoped = _get_attr(r, "unscoped_destinations") is True
+                unscoped = _get_attr(r, "unscoped_consumers") is True
                 category = "application_inbound" if unscoped else "application_intrascope"
 
             rule_result = _build_rule_search_result(
@@ -698,24 +698,69 @@ def _rule_search_scope_matches(
     """
     Check if ruleset scope includes app+env. Returns (matches, has_scope_labels).
     has_scope_labels=False means exclude (core infrastructure, no scopes).
+    Scope structure: scopes = [[{label: {href, key, value}, exclusion}, ...], ...]
+    Each scope is a list of label refs; each ref has nested "label" with href.
     """
     scopes = (_get_attr(rule_set, "scopes") or []) if rule_set else []
     if not scopes:
         return False, False
     has_any_labels = False
     for scope in scopes:
-        label_refs = _get_attr(scope, "label") or _get_attr(scope, "labels") or []
+        # scope is the list of label refs: [{label: {...}}, {label: {...}}]
+        label_refs = scope if isinstance(scope, list) else []
         if isinstance(label_refs, dict):
             label_refs = [label_refs]
         hrefs: set[str] = set()
         for lbl in label_refs:
-            href = _get_attr(lbl, "href", "") if isinstance(lbl, dict) else _get_attr(lbl, "href", "")
+            lbl_obj = _get_attr(lbl, "label") or lbl
+            href = _get_attr(lbl_obj, "href", "") if isinstance(lbl_obj, dict) else _get_attr(lbl_obj, "href", "")
             if href:
                 hrefs.add(href)
                 has_any_labels = True
         if app_href in hrefs and env_href in hrefs:
             return True, True
     return False, has_any_labels
+
+
+def _extract_scope_label_values(
+    rule_set: Any,
+    label_map: dict[str, tuple[str, str]],
+) -> list[str]:
+    """Extract display values from ruleset scopes. Scope structure: [[{label: {href, key, value}}, ...], ...]"""
+    result: list[str] = []
+    scopes = (_get_attr(rule_set, "scopes") or []) if rule_set else []
+    for scope in scopes:
+        label_refs = scope if isinstance(scope, list) else []
+        if isinstance(label_refs, dict):
+            label_refs = [label_refs]
+        for lbl in label_refs:
+            lbl_obj = _get_attr(lbl, "label") or lbl
+            href = _get_attr(lbl_obj, "href", "") if isinstance(lbl_obj, dict) else _get_attr(lbl_obj, "href", "")
+            key, value = label_map.get(href, ("", ""))
+            if not value and href:
+                value = _get_attr(lbl_obj, "value", "") if isinstance(lbl_obj, dict) else _get_attr(lbl_obj, "value", "")
+            display_val = (value or "").strip()
+            if display_val:
+                result.append(display_val)
+    return result
+
+
+def _format_rule_labels_all(
+    actors: list[Any],
+    label_map: dict[str, tuple[str, str]],
+) -> list[str]:
+    """Extract ALL labels from rule actors (app, env, loc, role, etc.). Used for Application rules."""
+    result: list[str] = []
+    for actor in actors or []:
+        lbl = _get_attr(actor, "label") or actor
+        href = _get_attr(lbl, "href", "") if isinstance(lbl, dict) else _get_attr(lbl, "href", "")
+        key, value = label_map.get(href, ("", ""))
+        if not value and href:
+            value = _get_attr(lbl, "value", "") if isinstance(lbl, dict) else _get_attr(lbl, "value", "")
+        display_val = (value or "").strip()
+        if display_val:
+            result.append(display_val)
+    return result
 
 
 def _format_rule_labels_for_display(
@@ -785,11 +830,36 @@ def _build_rule_search_result(
     env_href: str,
     label_map: dict[str, tuple[str, str]],
 ) -> IllumioRuleSearchResult:
-    """Build IllumioRuleSearchResult from raw rule and ruleset."""
-    consumers = _get_attr(rule, "destinations") or []
+    """Build IllumioRuleSearchResult from raw rule and ruleset. Merges scope labels per rule type."""
+    consumers = _get_attr(rule, "destinations") or _get_attr(rule, "consumers") or []
     providers = _get_attr(rule, "providers") or []
-    consumer_labels = _format_rule_labels_for_display(consumers, app_href, env_href, label_map)
-    provider_labels = _format_rule_labels_for_display(providers, app_href, env_href, label_map)
+    scope_labels = _extract_scope_label_values(rule_set, label_map)
+    logger.debug(
+        "Rule %s: category=%s scope_labels=%s",
+        (_get_attr(rule, "href", "") or "")[:60],
+        category,
+        scope_labels[:5] if scope_labels else [],
+    )
+
+    if category == "external":
+        consumer_labels = _format_rule_labels_for_display(consumers, app_href, env_href, label_map)
+        provider_labels = _format_rule_labels_for_display(providers, app_href, env_href, label_map)
+        source_labels = list(consumer_labels)
+        destination_labels = list(provider_labels) + list(scope_labels)
+        rule_type_display = "External"
+    elif category == "application_intrascope":
+        consumer_labels = _format_rule_labels_all(consumers, label_map)
+        provider_labels = _format_rule_labels_all(providers, label_map)
+        source_labels = list(consumer_labels) + list(scope_labels)
+        destination_labels = list(provider_labels) + list(scope_labels)
+        rule_type_display = "Internal"
+    else:
+        consumer_labels = _format_rule_labels_all(consumers, label_map)
+        provider_labels = _format_rule_labels_all(providers, label_map)
+        source_labels = list(consumer_labels)
+        destination_labels = list(provider_labels) + list(scope_labels)
+        rule_type_display = "Inbound"
+
     ingress = _get_attr(rule, "ingress_services") or []
     return IllumioRuleSearchResult(
         href=_get_attr(rule, "href", ""),
@@ -797,7 +867,10 @@ def _build_rule_search_result(
         ruleset_name=_get_attr(rule_set, "name", "") if rule_set else "",
         ruleset_href=_get_attr(rule_set, "href", "") if rule_set else "",
         category=category,
-        unscoped_destinations=_get_attr(rule, "unscoped_destinations") is True,
+        rule_type_display=rule_type_display,
+        unscoped_consumers=_get_attr(rule, "unscoped_consumers") is True,
+        source_labels=source_labels,
+        destination_labels=destination_labels,
         consumer_labels=consumer_labels,
         provider_labels=provider_labels,
         ingress_services_summary=_parse_ingress_services_summary(ingress),
