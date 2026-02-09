@@ -3,7 +3,7 @@ import asyncio
 import logging
 import os
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from frodo.config import setup_logging
@@ -122,19 +122,42 @@ async def health():
 @app.get("/api/applications")
 async def get_applications(
     x_ad_groups: str | None = Header(default=None, alias="X-AD-Groups"),
+    search: str | None = Query(default=None, description="Partial match on application name (case-insensitive)"),
+    environment: str | None = Query(default=None, description="Filter by environment"),
+    firewall: str | None = Query(default=None, description="Filter by firewall platform (illumio, nsx, etc.)"),
+    illumio_status: str | None = Query(default=None, description="Filter by Illumio enforcement status"),
+    page: int = Query(default=1, ge=1, description="Page number (1-based)"),
+    limit: int = Query(default=50, ge=1, le=200, description="Page size (max 200)"),
 ):
     """
     Get application summaries for the current user.
     X-AD-Groups: comma-separated AD group names (for dev; ADFS will provide in production).
+    Set BYPASS_AD_FILTER=true to show all apps regardless of AD groups (for testing).
+    Supports search, filter, and pagination via query parameters.
     """
-    ad_groups = []
-    if x_ad_groups:
+    ad_groups: list[str] = []
+    if os.environ.get("BYPASS_AD_FILTER", "").strip().lower() in ("true", "1", "yes"):
+        ad_groups = []  # Empty = no filter, show all
+    elif x_ad_groups:
         ad_groups = [g.strip() for g in x_ad_groups.split(",") if g.strip()]
 
     service = _get_application_service()
     try:
-        applications = await service.get_applications_for_user(ad_groups=ad_groups)
-        return {"applications": [a.model_dump() for a in applications]}
+        applications, total = await service.get_applications_for_user(
+            ad_groups=ad_groups,
+            search=search,
+            environment=environment,
+            firewall=firewall,
+            illumio_status=illumio_status,
+            page=page,
+            limit=limit,
+        )
+        return {
+            "applications": [a.model_dump() for a in applications],
+            "total": total,
+            "page": page,
+            "limit": limit,
+        }
     except Exception as e:
         logger.exception("Failed to fetch applications")
         raise HTTPException(status_code=500, detail=str(e))

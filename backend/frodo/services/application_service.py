@@ -60,11 +60,21 @@ class ApplicationService:
     async def get_applications_for_user(
         self,
         ad_groups: list[str],
-    ) -> list[ApplicationSummary]:
+        *,
+        search: str | None = None,
+        environment: str | None = None,
+        firewall: str | None = None,
+        illumio_status: str | None = None,
+        page: int = 1,
+        limit: int = 50,
+    ) -> tuple[list[ApplicationSummary], int]:
         """
         Get application summaries for applications the user can manage.
         ad_groups: list of AD group names the user belongs to.
         Uses naming convention to map groups to (app, env).
+        Optional filters: search (partial match on app name), environment, firewall, illumio_status.
+        Pagination: page (1-based), limit (default 50, max 200).
+        Returns (applications_for_page, total_count).
         """
         servers = await self.unicorn.get_servers()
 
@@ -146,7 +156,39 @@ class ApplicationService:
                 )
             )
 
-        return sorted(summaries, key=lambda a: (a.business_application_name, a.environment))
+        sorted_summaries = sorted(summaries, key=lambda a: (a.business_application_name, a.environment))
+
+        # Apply filters
+        filtered = sorted_summaries
+        if search and search.strip():
+            search_lower = search.strip().lower()
+            filtered = [a for a in filtered if search_lower in a.business_application_name.lower()]
+        if environment and environment.strip():
+            env_lower = environment.strip().lower()
+            filtered = [a for a in filtered if a.environment.lower() == env_lower]
+        if firewall and firewall.strip():
+            try:
+                fw_platform = FirewallPlatform(firewall.strip().lower())
+                filtered = [a for a in filtered if fw_platform in a.firewalls]
+            except ValueError:
+                pass  # Invalid firewall platform, ignore filter
+        if illumio_status and illumio_status.strip():
+            try:
+                status = IllumioEnforcementStatus(illumio_status.strip().lower())
+                filtered = [a for a in filtered if a.illumio_enforcement_status == status]
+            except ValueError:
+                pass  # Invalid status, ignore filter
+
+        total_count = len(filtered)
+
+        # Pagination
+        limit = min(max(1, limit), 200)
+        page = max(1, page)
+        start = (page - 1) * limit
+        end = start + limit
+        paginated = filtered[start:end]
+
+        return (paginated, total_count)
 
 
 def _expand_allowed_app_envs(ad_groups: list[str]) -> set[tuple[str, str]] | None:
